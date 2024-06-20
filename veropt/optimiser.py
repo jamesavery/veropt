@@ -115,6 +115,7 @@ class BayesOptimiser:
         if torch.is_tensor(obj_func.bounds):
             self.bounds = obj_func.bounds.reshape(2, self.n_params)
         else:
+            print(f"bounds = {obj_func.bounds}")
             self.bounds = torch.tensor(obj_func.bounds).reshape(2, self.n_params)
 
         self.obj_func_coords = torch.zeros([0, self.n_params])
@@ -414,6 +415,7 @@ class BayesOptimiser:
 
             new_x, new_y = self.evaluate_points(suggested_steps)
 
+            print(f"new_x = {new_x}, new_y = {new_y}")
             self.add_new_points(new_x, new_y)
 
         else:
@@ -443,7 +445,7 @@ class BayesOptimiser:
                   f" at step {self.current_step} out of {self.n_steps}"
                   f" | Best value: {best_val_string}")
 
-            print_string = f"Newest obj. func. value: {self.obj_func_vals[0, -1]:.2f}"
+            print_string = f"Newest obj. func. value: {self.obj_func_vals[0, -1]}"
             print_string += " | Newest point: " + self.format_list(self.obj_func_coords[0, -1].detach().tolist())
 
             print(print_string)
@@ -517,7 +519,10 @@ class BayesOptimiser:
             self.init_steps = self.normaliser_x.transform(init_steps.squeeze(0))
             self.init_steps = torch.tensor(self.init_steps).unsqueeze(0)
 
-        self.bounds = self.normaliser_x.transform(self.obj_func.bounds)
+        self.bounds = np.array(self.obj_func.bounds)
+        if(len(self.bounds.shape) == 1): self.bounds = self.bounds.reshape(2,1)
+        print(f"opt bounds: {self.bounds}")
+        self.bounds = self.normaliser_x.transform(self.bounds)
         self.bounds = torch.tensor(self.bounds)
 
         if self.using_priors:
