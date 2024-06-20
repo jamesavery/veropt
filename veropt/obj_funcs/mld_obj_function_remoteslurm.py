@@ -77,11 +77,8 @@ class MLD1ObjFun(ObjFunction):
         self.rootdir: str = rootdir
         self.source_file_path: str = f"{self.rootdir}/{self.experiment}/{self.experiment}.py"
         self.assets_file_path: str = f"{self.rootdir}/{self.experiment}/assets.json"
-        self.n_cores: int = ncores
-        self.n_cores_nx: int = ncores_nx
-        self.n_cores_ny: int = ncores_ny
-        self.partition_name: str = "aegir"
-        self.constraint: str = "v1"
+        self.serverinfo = {'hostname': 'aegir', 'account': 'nn9297k', 'partition': 'aegir', constraints: 'v1'}
+        self.slurm_resources = {'max_time':'23:59:59','n_cores': ncores, 'n_cores_nx': ncores_nx, 'n_cores_ny': ncores_ny}
         self.ncycles: int = ncycles
         self.cycle_length: int = 31104000 # - year  # 2592000 - month
         self.backend: str = "jax"
@@ -118,7 +115,9 @@ class MLD1ObjFun(ObjFunction):
 
         print(setup_args)
         self.setup_runs(setup_args)
+        self.transfer_jobs(setup_args)
         self.start_jobs(setup_args)
+
         for i in range(self.ncycles):
             self.check_jobs_status(setup_args)
 
@@ -148,7 +147,7 @@ class MLD1ObjFun(ObjFunction):
 
     
     def setup_runs(self, setup_args) -> None:
-        setup_names = [f"{self.experiment}={arg}" for arg in setup_args] #  "mld_experiment1-c_k-0.1", "mld_experiment1-c_k-0.2",
+        setup_names = [f"{self.experiment}={arg}" for arg in setup_args] #  "mld_experiment1=c_k=0.1", "mld_experiment1-c_k-0.2",
 
         for setup in setup_names:
             setup_dir = f"{self.rootdir}/{self.experiment}/{setup}"
@@ -175,16 +174,41 @@ class MLD1ObjFun(ObjFunction):
             _write_batch_script(f"{setup_dir}/veros_batch.sh", batch_script_str)
 
 
-    def start_jobs(self, setup_args) -> None:
+    def transfer_jobs(self, setup_args, serverinfo) -> None:
+        setup_names = [f"{self.experiment}={arg}" for arg in setup_args] #  "mld_experiment1=c_k=0.1", "mld_experiment1-c_k-0.2",
+
+        hostname = serverinfo['hostname']
+
+        for setup in setup_names:
+            setup_dir = f"{self.rootdir}/{self.experiment}/{setup}"
+
+            # TODO: Use python fabric module for error handling
+            pipe = subprocess.Popen(["scp","-Cr", setup_dir, f"{hostname}:ocean/{self.experiment}/"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True)
+            result = pipe.stdout.read()
+            stderr = pipe.stdout.read()
+
+            if not stderr:
+                print(f"Transferred {setup_dir} to {hostname}:ocean/{self.experiment}/{setup} with result: {result}")
+            else:
+                print(f"Error transferring {setup_dir} to {hostname}:ocean/{self.experiment}/{setup}, aborting...")
+                sys.exit(1)
+        
+
+    def start_jobs(self, setup_args, serverinfo) -> None:
         #self.startup_jobs = {} # remove
 
         setup_names = [f"{self.experiment}={arg}" for arg in setup_args] #  "mld_experiment1-c_k-0.1", "mld_experiment1-c_k-0.2",
+        hostname = serverinfo['hostname']
 
         for setup in setup_names:
-            os.chdir(f"{self.rootdir}/{self.experiment}/{setup}")
-            print(f"\nSubmitting job {self.rootdir}/{self.experiment}/{setup}/veros_batch.sh")
+            print(f"\nSubmitting job {hostname}:ocean/{self.experiment}/{setup}/veros_batch.sh")            
 
-            pipe = subprocess.Popen(["sbatch", "--parsable", "veros_batch.sh"],
+            (f"ssh {hostname} 'cd ocean/{self.experiment}/{setup} && sbatch --parsable veros_batch.sh'")
+
+            pipe = subprocess.Popen(["ssh", hostname, 
+                                     f"'cd ocean/{self.experiment}/{setup} && sbatch --parsable veros_batch.sh'"],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True)
             jobid = int(pipe.stdout.read())
@@ -244,18 +268,21 @@ class MLD1ObjFun(ObjFunction):
                 time.sleep(self.sleeping_time)
 
 
-    def make_batch_script(self, setup_name: str) -> str:
+    def make_batch_script(self, setup_name: str, serverinfo) -> str:
         dummy = setup_name.split("=")[1:]
         setup_args_dict = {dummy[i]: float(dummy[i + 1]) for i in range(0, len(dummy), 2)}
         with open(f"{self.rootdir}/{self.experiment}/{setup_name}/setup_args.txt", "w") as f:
             json.dump(setup_args_dict, f)
 
+        account = serverinfo['account']
+        partition_name = serverinfo['partition']
+
         return f"""#!/bin/bash -l
-#SBATCH -p {self.partition_name}
-#SBATCH -A ocean
+#SBATCH -p {partition_name}
+#SBATCH -A {account}
 #SBATCH --job-name={setup_name}
-#SBATCH --time=23:59:59
-#SBATCH --constraint={self.constraint}
+#SBATCH --time={self.slurm_resources['max_time']} # TODO: set in constructor
+##SBATCH --constraint={self.slurm_resources['constraints']}
 #SBATCH --nodes=1
 #SBATCH --ntasks={self.n_cores}
 #SBATCH --cpus-per-task=1
