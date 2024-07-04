@@ -1,13 +1,6 @@
-import os
-import sys
-import json
-import stat
-import time
-import shutil
-import subprocess
+import os, sys, json, stat, time, shutil, subprocess
 from dataclasses import dataclass, field
-import xarray as xr
-import numpy as np
+import xarray as xr, numpy as np
 from veropt import ObjFunction
 
 
@@ -51,53 +44,64 @@ def calc_y(optimized_dataset, target_dataset, lat_range):
 
 
 class MLD1ObjFun(ObjFunction):
-    def __init__(self, param_names, param_list_filename, n_params, bounds_lower, bounds_upper,
-                 rootdir="/groups/ocean/mmroz/mld_experiments_aegir",
-                 experiment="mld_experiment1", float_type="float32", 
-                 ncores=16, ncores_nx=4, ncores_ny=4, ncycles=6, res="4deg", lat_range=(-23,23),
-                 target="observations", target_filename="IFREMER_mld_rho_tropics"):
+    def __init__(self, 
+                 expt_cfg, server_cfg, local_cfg): 
+
+        self.expt_cfg   = expt_cfg
+        self.server_cfg = server_cfg
+        self.local_cfg  = local_cfg         
 
         # location, name, latitude range and resolution of the target mixed layer depth (MLD) map
-        self.target = target
-        self.target_filename = target_filename 
-        self.lat_range = lat_range
-        self.res = res
+        #target_type: "simulated_target" | "ifremer"
+        #experiment_type: "mixed_layer_depth" | "..."
+        local_outputdir = local_cfg['outputdir']
+        local_datadir   = local_cfg['datadir']
+        target_type     = expt_cfg['target_type']
+        experiment_type = expt_cfg['experiment_type']
+        experiment_name = expt_cfg['experiment_name']
+
+        self.target_directory = f"{local_datadir}/{target_type}/{experiment_type}"
+        self.target_dataset = xr.open_dataset(f"{self.target_directory}/{expt_cfg['target_filename']}.nc")
 
         # optimiser setup
-        self.param_list_filename: str = param_list_filename
-        self.param_names: str = param_names
-        bounds = [bounds_lower, bounds_upper]
-        n_objs = 1
+        self.param_list_filename = f'{local_outputdir}/{experiment_name}/param_list_{experiment_name}.txt'
+        param_names = expt_cfg['param_names']
+        param_str   = ",".join(param_names)
+
+        with open(self.param_list_filename, "w") as file:
+            file.write(f"{param_str}obj_func")        
+
+        bounds = [expt_cfg['bounds_lower'], expt_cfg['bounds_upper']]
+        n_objs = expt_cfg['n_objectives']
+        
+        # TODO: Potentially not none - should live in... experiment.json 
         init_vals = None
         stds = None
 
-        # slurm setup
+        # slurm setup 
+        # TODO: Gradually move to server configuation
+        # TODO: Also clean up to reflect structure
         self.sleeping_time: int = 10 # in seconds
-        self.experiment: str = experiment
-        self.rootdir: str = rootdir
-        self.source_file_path: str = f"{self.rootdir}/{self.experiment}/{self.experiment}.py"
-        self.assets_file_path: str = f"{self.rootdir}/{self.experiment}/assets.json"
-        self.serverinfo = {'hostname': 'aegir', 'account': 'nn9297k', 'partition': 'aegir', constraints: 'v1'}
-        self.slurm_resources = {'max_time':'23:59:59','n_cores': ncores, 'n_cores_nx': ncores_nx, 'n_cores_ny': ncores_ny}
-        self.ncycles: int = ncycles
-        self.cycle_length: int = 31104000 # - year  # 2592000 - month
-        self.backend: str = "jax"
-        self.float_type: str = float_type
+        self.experiment_name: str = experiment_name
+        self.source_file_path: str = f"{local_outputdir}/{self.experiment_name}/{self.experiment_name}.py"
+        self.assets_file_path: str = f"{local_outputdir}/{self.experiment_name}/assets.json"
         self.startup_jobs: dict = field(default_factory=dict)
 
-        super().__init__(self.mldObjFunc, bounds, n_params, n_objs, init_vals, stds)
+        super().__init__(self.mldObjFunc, bounds, len(param_names), n_objs, init_vals, stds)
 
 
     def mldObjFunc(self, new_x):
 
+        experiment_name = self.expt_cfg['experiment_name']
+        local_outputdir = self.local_cfg['outputdir']
+        ncycles = self.server_cfg['n_cycles']
+        
         n_points = len(new_x.numpy()[0])
         n_params = len(new_x.numpy()[0][0])
         setup_args = ()
         y = []
         param_val_strings = []
-
-        target_filepath = f"{self.rootdir}/target_dataset"
-        target_dataset = xr.open_dataset(f"{target_filepath}/{self.target_filename}.nc")
+        param_names = self.expt_cfg['param_names']
 
         for i in range(n_points):
             # in new_x.numpy()[i][j][k]
@@ -107,7 +111,7 @@ class MLD1ObjFun(ObjFunction):
             param_val_string = ""
             setup_string = ""
             for j in range(n_params):
-                param_name, param_val = self.param_names[j], new_x.numpy()[0][i][j]
+                param_name, param_val = param_names[j], new_x.numpy()[0][i][j]
                 param_val_string += f"{param_val},"
                 setup_string += f"{param_name}={param_val}="
             setup_args += (setup_string[:-1],)
@@ -116,24 +120,30 @@ class MLD1ObjFun(ObjFunction):
         print(setup_args)
         self.setup_runs(setup_args)
         self.transfer_jobs(setup_args)
+        print("Finished transferring jobs")
+        sys.exit(0)
+
         self.start_jobs(setup_args)
 
-        for i in range(self.ncycles):
+        for i in range(ncycles):
             self.check_jobs_status(setup_args)
 
-        setup_names = [f"{self.experiment}={arg}" for arg in setup_args]
+        setup_names = [f"{experiment_name}={arg}" for arg in setup_args]
 
         for setup, param_val_string in zip(setup_names, param_val_strings):
-            optimized_filepath = f"{self.rootdir}/{self.experiment}/{setup}"
-            optimized_filename = f"/{setup}.{str(self.ncycles-1).zfill(4)}.averages"
+            optimized_filepath = f"{local_outputdir}/{experiment_name}/{setup}"
+            optimized_filename = f"/{setup}.{str(ncycles-1).zfill(4)}.averages"
 
-            if self.target == "observations":
-                correct_coords(f"{optimized_filepath}/{optimized_filename}", self.res)
+            target_type = self.expt_cfg['target_type']
+            if target_type == "ifremer":
+                correct_coords(f"{optimized_filepath}/{optimized_filename}", self.expt_cfg['map_resolution'])
                 optimized_dataset = xr.open_dataset(f"{optimized_filepath}/{optimized_filename}_corr_coords.nc")
-            else: 
+            elif target_type == "simulated_target": 
                 optimized_dataset = xr.open_dataset(f"{optimized_filepath}/{optimized_filename}.nc")
+            else:
+                raise ValueError("Target type should be either 'ifremer' or 'simulated_target'.")
 
-            new_y = calc_y(optimized_dataset, target_dataset, lat_range=self.lat_range)
+            new_y = calc_y(optimized_dataset, self.target_dataset, lat_range=self.expt_cfg['lat_range'])
             y.append(new_y)
 
             with open(self.param_list_filename, "a") as file:
@@ -147,10 +157,13 @@ class MLD1ObjFun(ObjFunction):
 
     
     def setup_runs(self, setup_args) -> None:
-        setup_names = [f"{self.experiment}={arg}" for arg in setup_args] #  "mld_experiment1=c_k=0.1", "mld_experiment1-c_k-0.2",
+        experiment_name = self.expt_cfg['experiment_name']
+        local_outputdir = self.local_cfg['outputdir']     
+
+        setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1=c_k=0.1", "mld_experiment1-c_k-0.2",
 
         for setup in setup_names:
-            setup_dir = f"{self.rootdir}/{self.experiment}/{setup}"
+            setup_dir = f"{self.local_cfg['outputdir']}/{experiment_name}/{setup}"
 
             if not os.path.exists(setup_dir):
                 os.makedirs(setup_dir)
@@ -174,41 +187,46 @@ class MLD1ObjFun(ObjFunction):
             _write_batch_script(f"{setup_dir}/veros_batch.sh", batch_script_str)
 
 
-    def transfer_jobs(self, setup_args, serverinfo) -> None:
-        setup_names = [f"{self.experiment}={arg}" for arg in setup_args] #  "mld_experiment1=c_k=0.1", "mld_experiment1-c_k-0.2",
+    def transfer_jobs(self, setup_args) -> None:
+        experiment_name = self.expt_cfg['experiment_name']
+        local_outputdir = self.local_cfg['outputdir']        
 
-        hostname = serverinfo['hostname']
+        setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1=c_k=0.1", "mld_experiment1-c_k-0.2",
+
+        hostname = self.server_cfg['hostname']
 
         for setup in setup_names:
-            setup_dir = f"{self.rootdir}/{self.experiment}/{setup}"
+            setup_dir = f"{local_outputdir}/{experiment_name}/{setup}"
 
             # TODO: Use python fabric module for error handling
-            pipe = subprocess.Popen(["scp","-Cr", setup_dir, f"{hostname}:ocean/{self.experiment}/"],
+            pipe = subprocess.Popen(["scp","-Cr", setup_dir, f"{hostname}:ocean/{experiment_name}/"],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True)
             result = pipe.stdout.read()
             stderr = pipe.stdout.read()
 
             if not stderr:
-                print(f"Transferred {setup_dir} to {hostname}:ocean/{self.experiment}/{setup} with result: {result}")
+                print(f"Transferred {setup_dir} to {hostname}:ocean/{experiment_name}/{setup} with result: {result}")
             else:
-                print(f"Error transferring {setup_dir} to {hostname}:ocean/{self.experiment}/{setup}, aborting...")
+                print(f"Error transferring {setup_dir} to {hostname}:ocean/{experiment_name}/{setup}, aborting...")
                 sys.exit(1)
         
 
-    def start_jobs(self, setup_args, serverinfo) -> None:
+    def start_jobs(self, setup_args) -> None:
+        experiment_name = self.expt_cfg['experiment_name']
+        local_outputdir = self.local_cfg['outputdir']                
         #self.startup_jobs = {} # remove
 
-        setup_names = [f"{self.experiment}={arg}" for arg in setup_args] #  "mld_experiment1-c_k-0.1", "mld_experiment1-c_k-0.2",
-        hostname = serverinfo['hostname']
+        setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1-c_k-0.1", "mld_experiment1-c_k-0.2",
+        hostname = self.server_cfg['hostname']
 
         for setup in setup_names:
-            print(f"\nSubmitting job {hostname}:ocean/{self.experiment}/{setup}/veros_batch.sh")            
+            print(f"\nSubmitting job {hostname}:ocean/{experiment_name}/{setup}/veros_batch.sh")            
 
-            (f"ssh {hostname} 'cd ocean/{self.experiment}/{setup} && sbatch --parsable veros_batch.sh'")
+            (f"ssh {hostname} 'cd ocean/{experiment_name}/{setup} && sbatch --parsable veros_batch.sh'")
 
             pipe = subprocess.Popen(["ssh", hostname, 
-                                     f"'cd ocean/{self.experiment}/{setup} && sbatch --parsable veros_batch.sh'"],
+                                     f"'cd ocean/{experiment_name}/{setup} && sbatch --parsable veros_batch.sh'"],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True)
             jobid = int(pipe.stdout.read())
@@ -228,15 +246,17 @@ class MLD1ObjFun(ObjFunction):
            JobName=mld_experiment1
            JobState=RUNNING/PENDING
         """
+        experiment_name = self.expt_cfg['experiment_name']
+        local_outputdir = self.local_cfg['outputdir']                
 
-        setup_names = [f"{self.experiment}={arg}" for arg in setup_args] #  "mld_experiment1-c_k-0.1", "mld_experiment1-c_k-0.2",
+        setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1-c_k-0.1", "mld_experiment1-c_k-0.2",
         submitted_jobs = setup_names.copy()
 
         while submitted_jobs:
 
             for setup in submitted_jobs:
 
-                log_file = f"{self.rootdir}/{self.experiment}/{setup}/{setup}.out"
+                log_file = f"{local_outputdir}/{experiment_name}/{setup}/{setup}.out"
                 if os.path.isfile(log_file) and os.stat(log_file).st_size != 0:
                     with open(log_file, "r") as f:
                         jobid = f.readline().split("=")[-1].strip()
@@ -268,23 +288,29 @@ class MLD1ObjFun(ObjFunction):
                 time.sleep(self.sleeping_time)
 
 
-    def make_batch_script(self, setup_name: str, serverinfo) -> str:
+    def make_batch_script(self, setup_name: str) -> str:
+        experiment_name = self.expt_cfg['experiment_name']
+        local_outputdir = self.local_cfg['outputdir']                
+
         dummy = setup_name.split("=")[1:]
         setup_args_dict = {dummy[i]: float(dummy[i + 1]) for i in range(0, len(dummy), 2)}
-        with open(f"{self.rootdir}/{self.experiment}/{setup_name}/setup_args.txt", "w") as f:
+        with open(f"{local_outputdir}/{experiment_name}/{setup_name}/setup_args.txt", "w") as f:
             json.dump(setup_args_dict, f)
 
-        account = serverinfo['account']
-        partition_name = serverinfo['partition']
+        account        = self.server_cfg['account']
+        partition_name = self.server_cfg['partition']
+
+        slurm_constraints = self.server_cfg['constraints']
+        constraint_string = f"#SBATCH --constraint={slurm_constraints}\n" if slurm_constraints else ""
 
         return f"""#!/bin/bash -l
 #SBATCH -p {partition_name}
 #SBATCH -A {account}
 #SBATCH --job-name={setup_name}
-#SBATCH --time={self.slurm_resources['max_time']} # TODO: set in constructor
-##SBATCH --constraint={self.slurm_resources['constraints']}
+#SBATCH --time={self.server_cfg['max_time']} # TODO: set in constructor
+{constraint_string}
 #SBATCH --nodes=1
-#SBATCH --ntasks={self.n_cores}
+#SBATCH --ntasks={self.server_cfg['n_cores']}
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=0
 ##SBATCH --threads-per-core=1
@@ -316,7 +342,9 @@ fi
 
 conda activate veros_jax_cpu
 
-veros resubmit -i {setup_name} -n {self.ncycles} -l {self.cycle_length} \
--c 'mpiexec -n {self.n_cores} -- veros run {setup_name}.py -b {self.backend} -n {self.n_cores_nx} {self.n_cores_ny} --float-type {self.float_type}' \
+veros resubmit -i {setup_name} -n {self.server_cfg['n_cycles']} -l {self.expt_cfg['cycle_length']} \
+-c 'mpiexec -n {self.server_cfg['n_cores']} -- veros run {setup_name}.py \
+-b {self.server_cfg['backend']} -n {self.server_cfg['n_cores_nx']} {self.server_cfg['n_cores_ny']} \
+--float-type {self.server_cfg['float_type']}' \
 --callback 'sbatch veros_batch.sh'
 """
