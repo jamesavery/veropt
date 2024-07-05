@@ -119,6 +119,7 @@ class MLD1ObjFun(ObjFunction):
 
         print(setup_args)
         self.setup_runs(setup_args)
+        print("Finished setting up runs")
         self.transfer_jobs(setup_args)
         print("Finished transferring jobs")
         sys.exit(0)
@@ -163,7 +164,7 @@ class MLD1ObjFun(ObjFunction):
         setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1=c_k=0.1", "mld_experiment1-c_k-0.2",
 
         for setup in setup_names:
-            setup_dir = f"{self.local_cfg['outputdir']}/{experiment_name}/{setup}"
+            setup_dir = f"{local_outputdir}/{experiment_name}/{setup}"
 
             if not os.path.exists(setup_dir):
                 os.makedirs(setup_dir)
@@ -172,8 +173,8 @@ class MLD1ObjFun(ObjFunction):
                 print(f"\nDirectory exists: {setup_dir}")
 
             if not os.path.isfile(f"{setup_dir}/{setup}.py"):
-                shutil.copy(self.source_file_path, f"{setup_dir}/{setup}.py")
-                print(f"    File {setup}.py was copied to: {setup_dir}")
+                shutil.copy(self.source_file_path, f"{setup_dir}/experiment.py")
+                print(f"    File {self.source_file_path}.py was copied to: {setup_dir}")
             else:
                 print(f"    File exists: {setup_dir}/{setup}.py")
 
@@ -184,7 +185,7 @@ class MLD1ObjFun(ObjFunction):
                 print(f"    File exists: {setup_dir}/assets.json")
 
             batch_script_str = self.make_batch_script(setup)
-            _write_batch_script(f"{setup_dir}/veros_batch.sh", batch_script_str)
+            _write_batch_script(f"{setup_dir}/run_veros.slurm", batch_script_str)
 
 
     def transfer_jobs(self, setup_args) -> None:
@@ -196,19 +197,22 @@ class MLD1ObjFun(ObjFunction):
         hostname = self.server_cfg['hostname']
 
         for setup in setup_names:
-            setup_dir = f"{local_outputdir}/{experiment_name}/{setup}"
+            setup_dir  = f"{local_outputdir}/{experiment_name}/{setup}"
+            remote_dir = f"{hostname}:ocean/veropt_results/{experiment_name}/"
 
+            print(f"Attempting: scp -Cr {setup_dir} {remote_dir}/")
             # TODO: Use python fabric module for error handling
-            pipe = subprocess.Popen(["scp","-Cr", setup_dir, f"{hostname}:ocean/{experiment_name}/"],
+            pipe = subprocess.Popen(["scp","-Cr", setup_dir, f"{remote_dir}/"],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True)
             result = pipe.stdout.read()
             stderr = pipe.stderr.read()
             if not stderr:
-
-                print(f"Transferred {setup_dir} to {hostname}:ocean/{experiment_name}/{setup} with result: {result}")
+                print(f"Transferred {setup_dir} to {remote_dir} with result: {result}")
             else:
-                print(f"Error transferring {setup_dir} to {hostname}:ocean/{experiment_name}/{setup}, aborting...")
+                print(f"Error transferring {setup_dir} to {remote_dir}")
+                print(f"Error: {stderr}")
+                print(f"Aborting.\n\n")
                 sys.exit(1)
         
 
@@ -291,60 +295,16 @@ class MLD1ObjFun(ObjFunction):
     def make_batch_script(self, setup_name: str) -> str:
         experiment_name = self.expt_cfg['experiment_name']
         local_outputdir = self.local_cfg['outputdir']                
+        local_sourcedir = self.local_cfg['source_dir']
+        server_hostname = self.server_cfg['hostname']
 
         dummy = setup_name.split("=")[1:]
         setup_args_dict = {dummy[i]: float(dummy[i + 1]) for i in range(0, len(dummy), 2)}
         with open(f"{local_outputdir}/{experiment_name}/{setup_name}/setup_args.txt", "w") as f:
             json.dump(setup_args_dict, f)
 
-        account        = self.server_cfg['account']
-        partition_name = self.server_cfg['partition']
-
-        slurm_constraints = self.server_cfg['constraints']
-        constraint_string = f"#SBATCH --constraint={slurm_constraints}\n" if slurm_constraints else ""
-
-        return f"""#!/bin/bash -l
-#SBATCH -p {partition_name}
-#SBATCH -A {account}
-#SBATCH --job-name={setup_name}
-#SBATCH --time={self.server_cfg['max_time']} # TODO: set in constructor
-{constraint_string}
-#SBATCH --nodes=1
-#SBATCH --ntasks={self.server_cfg['n_cores']}
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=0
-##SBATCH --threads-per-core=1
-##SBATCH --exclusive
-#SBATCH --output={setup_name}.out
-
-if [ X"$SLURM_STEP_ID" = "X" -a X"$SLURM_PROCID" = "X"0 ]
-then
-    echo "SLURM_JOB_ID = $SLURM_JOB_ID"
-fi
-
-export OMP_NUM_THREADS=2
-
-command="ml list"
-search_string="miniconda/python3.11"
-
-if $command | grep -q "$search_string"; then
-    echo "Miniconda has already been loaded"
-else
-    echo "miniconda has not been loaded yet; loading --->"
-    ml load miniconda/python3.11
-fi
-
-#conda init bash
-#source $HOME/.bashrc
-if [ "$CONDA_DEFAULT_ENV" = "veropt" ]; then
-    conda deactivate
-fi
-
-conda activate veros_jax_cpu
-
-veros resubmit -i {setup_name} -n {self.server_cfg['n_cycles']} -l {self.expt_cfg['cycle_length']} \
--c 'mpiexec -n {self.server_cfg['n_cores']} -- veros run {setup_name}.py \
--b {self.server_cfg['backend']} -n {self.server_cfg['n_cores_nx']} {self.server_cfg['n_cores_ny']} \
---float-type {self.server_cfg['float_type']}' \
---callback 'sbatch veros_batch.sh'
-"""
+        with open(f"{local_sourcedir}/servers/{server_hostname}/run_veros.slurm", "r") as f:
+            batch_script_str = f.read()
+        
+        self.server_cfg['setup_name'] = setup_name
+        return batch_script_str.format(**self.server_cfg)
