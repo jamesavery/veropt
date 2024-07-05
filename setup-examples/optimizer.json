@@ -1,0 +1,6 @@
+{
+    "raw_lengthscale": [0.05,4],
+    "beta": 0.8,
+    "n_bayes_rounds" : 1, 
+    "n_init_rounds" : 1    
+}
