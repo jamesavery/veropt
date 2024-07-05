@@ -76,20 +76,24 @@ experiment_dir      = f"{local_cfg['outputdir']}/{experiment_name}"
 try:
     with open(f"{experiment_dir}/experiment.json","r") as f:
         expt_cfg = json.load(f)
-except:
-    raise FileNotFoundError(f"Experiment config file {experiment_dir}/experiment.json not found")
+except Exception as e:
+    print(f"While reading {experiment_dir}/experiment.json:\n\t{e}")
+    sys.exit(1)
+
  
 # READ IN OPTIMIZER CONFIG
 try: 
     with open(f"{experiment_dir}/{optimizer_config_name}.json","r") as f:
         opt_cfg = json.load(f)
-except: 
-    raise FileNotFoundError(f"Optimizer config file {experiment_dir}/{optimizer_config_name}.json not found")
+except Exception as e: 
+    print(f"While reading {experiment_dir}/{optimizer_config_name}.json:\n\t{e}")
+    sys.exit(2)    
+    
 
-print(f"Experiment config: {expt_cfg}")
+print(f"\n\nExperiment config: {expt_cfg}")
 print(f"Server config: {server_cfg}")
 print(f"Local machine config: {local_cfg}")
-print(f"Optimisation config: {opt_cfg}")
+print(f"Optimisation config: {opt_cfg}\n\n")
 
 # SET UP OPTIMIZER 
 obj_func = MLD1ObjFun(expt_cfg,server_cfg,local_cfg)

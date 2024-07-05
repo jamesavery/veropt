@@ -83,7 +83,7 @@ class MLD1ObjFun(ObjFunction):
         # TODO: Also clean up to reflect structure
         self.sleeping_time: int = 10 # in seconds
         self.experiment_name: str = experiment_name
-        self.source_file_path: str = f"{local_outputdir}/{self.experiment_name}/{self.experiment_name}.py"
+        self.source_file_path: str = f"{local_outputdir}/{self.experiment_name}/experiment.py"
         self.assets_file_path: str = f"{local_outputdir}/{self.experiment_name}/assets.json"
         self.startup_jobs: dict = field(default_factory=dict)
 
@@ -203,9 +203,9 @@ class MLD1ObjFun(ObjFunction):
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True)
             result = pipe.stdout.read()
-            stderr = pipe.stdout.read()
-
+            stderr = pipe.stderr.read()
             if not stderr:
+
                 print(f"Transferred {setup_dir} to {hostname}:ocean/{experiment_name}/{setup} with result: {result}")
             else:
                 print(f"Error transferring {setup_dir} to {hostname}:ocean/{experiment_name}/{setup}, aborting...")
