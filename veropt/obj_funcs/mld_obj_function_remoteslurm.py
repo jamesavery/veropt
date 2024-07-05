@@ -1,4 +1,4 @@
-import os, sys, json, stat, time, shutil, subprocess
+import os, sys, json, stat, time, tqdm, shutil, subprocess
 from dataclasses import dataclass, field
 import xarray as xr, numpy as np
 from veropt import ObjFunction
@@ -82,10 +82,8 @@ class MLD1ObjFun(ObjFunction):
         # TODO: Gradually move to server configuation
         # TODO: Also clean up to reflect structure
         self.sleeping_time: int = 10 # in seconds
-        self.experiment_name: str = experiment_name
-        self.source_file_path: str = f"{local_outputdir}/{self.experiment_name}/experiment.py"
-        self.assets_file_path: str = f"{local_outputdir}/{self.experiment_name}/assets.json"
-        self.startup_jobs: dict = field(default_factory=dict)
+        self.source_file_path: str = f"{local_outputdir}/{experiment_name}/experiment.py"
+        self.assets_file_path: str = f"{local_outputdir}/{experiment_name}/assets.json"
 
         super().__init__(self.mldObjFunc, bounds, len(param_names), n_objs, init_vals, stds)
 
@@ -94,7 +92,7 @@ class MLD1ObjFun(ObjFunction):
 
         experiment_name = self.expt_cfg['experiment_name']
         local_outputdir = self.local_cfg['outputdir']
-        ncycles = self.server_cfg['n_cycles']
+        n_cycles = self.server_cfg['n_cycles']
         
         n_points = len(new_x.numpy()[0])
         n_params = len(new_x.numpy()[0][0])
@@ -124,11 +122,11 @@ class MLD1ObjFun(ObjFunction):
         print("Finished transferring jobs")
         jobids = self.start_jobs(setup_args)
         print(f"Finished starting jobs, job ids: {jobids}") 
+
+        for i in range(n_cycles):
+            self.check_jobs_status(setup_args, jobids)
+
         sys.exit(0)
-
-        for i in range(ncycles):
-            self.check_jobs_status(setup_args)
-
         setup_names = [f"{experiment_name}={arg}" for arg in setup_args]
 
         for setup, param_val_string in zip(setup_names, param_val_strings):
@@ -156,7 +154,8 @@ class MLD1ObjFun(ObjFunction):
 
         return y
 
-    
+
+    #TODO: Tidy up.    
     def setup_runs(self, setup_args) -> None:
         experiment_name = self.expt_cfg['experiment_name']
         local_outputdir = self.local_cfg['outputdir']     
@@ -243,8 +242,6 @@ class MLD1ObjFun(ObjFunction):
                 print(f"Got {stdout} after submitting setup {setup}")
                 print(f"Output was:\n{stdout}")
                 jobids += [int(l) for l in stdout.split('\n') if l.isdigit()]
-                #self.startup_jobs.update({setup: jobid}) # remove
-                #os.system('squeue -p aegir -j ' + jobid + ' > squeue.out')
             else:
                 print(f"Submission of {setup} failed.")
                 print(f"Error output was:\n{stderr}")
@@ -254,31 +251,34 @@ class MLD1ObjFun(ObjFunction):
         return jobids
 
 
-    def check_jobs_status(self, setup_args) -> None:
+    def check_jobs_status(self, setup_args, jobids) -> None:
         """JobId=43848356
            JobName=mld_experiment1
            JobState=RUNNING/PENDING
         """
-        experiment_name = self.expt_cfg['experiment_name']
-        local_outputdir = self.local_cfg['outputdir']                
+        experiment_name  = self.expt_cfg  ['experiment_name']
+        local_outputdir  = self.local_cfg ['outputdir']                
+        remote_outputdir = self.server_cfg['outputdir']
+        hostname         = self.server_cfg['hostname']
 
         setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1-c_k-0.1", "mld_experiment1-c_k-0.2",
-        submitted_jobs = setup_names.copy()
+        submitted_jobs = [(jobids[i], setup_names[i]) for i in range(len(jobids))]
+
+        # TODO: 
+        #  - For each jobid in jobids
+        #  -- Check if the job is: queued, running, completing or completed
+        #  -- If running, print the progress from slurm-{jobid}.out
+        #  -- If completed, remove the corresponding setup from submitted_jobs
+
+        # TODO: 
+        #  try/except: On error, cancel all jobs and clean up.
 
         while submitted_jobs:
+            for jobid,setup in submitted_jobs:
+                remote_dir = f"{remote_outputdir}/ocean/veropt_results/{experiment_name}/{setup}/"
+                log_file   = f"{remote_dir}/slurm-{jobid}.out"               
 
-            for setup in submitted_jobs:
-
-                log_file = f"{local_outputdir}/{experiment_name}/{setup}/{setup}.out"
-                if os.path.isfile(log_file) and os.stat(log_file).st_size != 0:
-                    with open(log_file, "r") as f:
-                        jobid = f.readline().split("=")[-1].strip()
-                else:
-                    print(f"\nSetup {setup} has not been started yet")                    
-                    # break
-                    continue
-
-                pipe = subprocess.Popen(["scontrol", "show", "job", jobid],
+                pipe = subprocess.Popen(["ssh", hostname, f"scontrol show job {jobid}"],
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         text=True)
                 stdout = pipe.stdout.read()
@@ -290,15 +290,30 @@ class MLD1ObjFun(ObjFunction):
                         key, *value = item.split('=')
                         job_dict[key] = value[0] if value else None  # Using None or '' as the default value
 
-                    print("Job {jd[JobName]}({jd[JobId]}) status: {jd[JobState]}".format(jd=job_dict))
+                    print("Job {jd[JobId]}/{jd[JobName]} status: {jd[JobState]} (Reason: {jd[Reason]}).".format(jd=job_dict))
 
                 if "slurm_load_jobs error: Invalid job id specified" in stderr:
                     print(f"{jobid} status: COMPLETED")
                     submitted_jobs.remove(setup)
 
-            if submitted_jobs:
-                print("\nThe following jobs are still pending or running: " + ", ".join(submitted_jobs))
-                time.sleep(self.sleeping_time)
+                if job_dict['JobState'] == "RUNNING":
+                    pipe = subprocess.Popen(["ssh", hostname, f"tail -n 3 {log_file}"],
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            text=True)
+                    stdout = pipe.stdout.read()
+                    stderr = pipe.stderr.read()
+                    print(f"Progress of {jobid}:\n----------------------------------\n{stdout}\n----------------------------------\n")
+
+            if len(submitted_jobs)>0:
+                print("\nThe following jobs are still pending or running: " )
+                for jobid,setup in submitted_jobs:
+                    print(f"{jobid} {setup}")
+#                time.sleep(self.sleeping_time)
+
+                remote_poll_delay = 5*60; # should be in server/experiment config
+                for i in tqdm.tqdm(range(remote_poll_delay), "Time until next server poll"):
+                    time.sleep(1)
+    
 
 
     def make_batch_script(self, setup_name: str) -> str:
@@ -315,5 +330,7 @@ class MLD1ObjFun(ObjFunction):
         with open(f"{local_sourcedir}/servers/{server_hostname}/run_veros.slurm", "r") as f:
             batch_script_str = f.read()
         
-        self.server_cfg['setup_name'] = setup_name
-        return batch_script_str.format(**self.server_cfg)
+        template_substitutions = self.server_cfg | self.expt_cfg | {"setup_name": setup_name}
+        #print(f"template_substitutions: {template_substitutions}")
+
+        return batch_script_str.format(**template_substitutions)
