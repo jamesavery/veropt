@@ -1,0 +1,15 @@
+{
+    "experiment_name" : "lumi_test",
+    "experiment_type" : "ifremer",
+    "experiment_description" : "Test the remote slurm VerOpt objective function using the 4deg setup with 6d extended parameter space (TKE, EKE and bulk formula). The target is the 4x4 IFREMER map between 50S and 50N.",
+    "lat_range" : [-52,50],
+    "time_range" : [-2,-1],
+    "target_filepath" : "",
+    "target_filename" : "IFREMER_mld_rho_50S50N_4deg",
+    "parameter_list" : ["c_k", "c_eps", "eke_c_k", "eke_c_eps", "c_taux", "c_tauy"],
+    "bounds_lower" : [0.05, 0.05, 0.05, 0.05, 0.5, 0.5],
+    "bounds_upper" : [1.0,1.0,1.0,1.0,1.5,1.5],
+    "n_objs" : 1,
+    "n_bayes_rounds" : 1, 
+    "n_init_rounds" : 1
+}
