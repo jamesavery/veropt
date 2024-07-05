@@ -66,7 +66,7 @@ class GlobalFlexibleResolutionSetup(VerosSetup):
         print(type(c_eps), c_eps)
 
         settings.identifier = f"4deg"
-        settings.description = "Global model with flexible resolution"
+        #settings.description = "Global model with flexible resolution"
 
         settings.nx = 90
         settings.ny = 40
