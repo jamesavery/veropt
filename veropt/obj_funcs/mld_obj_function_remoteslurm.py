@@ -125,8 +125,9 @@ class MLD1ObjFun(ObjFunction):
 
         for i in range(n_cycles):
             self.check_jobs_status(setup_args, jobids)
+        
+        self.transfer_results(setup_args)
 
-        sys.exit(0)
         setup_names = [f"{experiment_name}={arg}" for arg in setup_args]
 
         for setup, param_val_string in zip(setup_names, param_val_strings):
@@ -214,6 +215,33 @@ class MLD1ObjFun(ObjFunction):
                 print(f"Error output was:\n{stderr}")
                 print(f"Aborting.\n\n")
                 sys.exit(4)
+
+    def transfer_results(self, setup_args) -> None:
+        experiment_name  = self.expt_cfg  ['experiment_name']
+        local_outputdir  = self.local_cfg ['outputdir']  
+        remote_outputdir = self.server_cfg['outputdir']      
+
+        setup_names = [f"{experiment_name}={arg}" for arg in setup_args]
+        hostname    = self.server_cfg['hostname']
+        remote_dir  = f"{remote_outputdir}/ocean/veropt_results/{experiment_name}/"
+
+        for setup in setup_names:
+            setup_dir = f"{local_outputdir}/{experiment_name}/{setup}"
+
+            print(f"Attempting: scp -Cr {hostname}:{remote_dir}/* {setup_dir}/")
+            pipe = subprocess.Popen(["scp","-Cr", f"{hostname}:{remote_dir}/\*", f"{setup_dir}/"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True)
+            result = pipe.stdout.read()
+            stderr = pipe.stderr.read()
+
+            if not stderr:
+                print(f"Transferred {remote_dir}/* to {setup_dir} with result: {result}")
+            else:
+                print(f"Error transferring {remote_dir}/* to {setup_dir}")
+                print(f"Error output was:\n{stderr}")
+                print(f"Aborting.\n\n")
+                sys.exit(5)
         
 
     def start_jobs(self, setup_args) -> None:
@@ -262,7 +290,6 @@ class MLD1ObjFun(ObjFunction):
         hostname         = self.server_cfg['hostname']
 
         setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1-c_k-0.1", "mld_experiment1-c_k-0.2",
-        submitted_jobs = [(jobids[i], setup_names[i]) for i in range(len(jobids))]
 
         # TODO: 
         #  - For each jobid in jobids
@@ -273,10 +300,18 @@ class MLD1ObjFun(ObjFunction):
         # TODO: 
         #  try/except: On error, cancel all jobs and clean up.
 
-        while submitted_jobs:
-            for jobid,setup in submitted_jobs:
+        pending_jobs = 0
+        for i in range(len(jobids)):
+            pending_jobs |= (1 << i)
+
+        while pending_jobs:
+            for i in range(len(jobids)):
+                jobid, setup = jobids[i], setup_names[i]
+
                 remote_dir = f"{remote_outputdir}/ocean/veropt_results/{experiment_name}/{setup}/"
                 log_file   = f"{remote_dir}/slurm-{jobid}.out"               
+
+
 
                 pipe = subprocess.Popen(["ssh", hostname, f"scontrol show job {jobid}"],
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -292,9 +327,9 @@ class MLD1ObjFun(ObjFunction):
 
                     print("Job {jd[JobId]}/{jd[JobName]} status: {jd[JobState]} (Reason: {jd[Reason]}).".format(jd=job_dict))
 
-                if "slurm_load_jobs error: Invalid job id specified" in stderr:
+                if job_dict['JobState'] == "COMPLETED" or "slurm_load_jobs error: Invalid job id specified" in stderr:
                     print(f"{jobid} status: COMPLETED")
-                    submitted_jobs.remove(setup)
+                    pending_jobs &= ~(1 << i)
 
                 if job_dict['JobState'] == "RUNNING":
                     pipe = subprocess.Popen(["ssh", hostname, f"tail -n 3 {log_file}"],
@@ -304,13 +339,13 @@ class MLD1ObjFun(ObjFunction):
                     stderr = pipe.stderr.read()
                     print(f"Progress of {jobid}:\n----------------------------------\n{stdout}\n----------------------------------\n")
 
-            if len(submitted_jobs)>0:
+            if pending_jobs:
                 print("\nThe following jobs are still pending or running: " )
-                for jobid,setup in submitted_jobs:
-                    print(f"{jobid} {setup}")
-#                time.sleep(self.sleeping_time)
+                for i in range(len(jobids)):
+                    if pending_jobs & (1 << i):
+                        print(f"{jobids[i]}")
 
-                remote_poll_delay = 5*60; # should be in server/experiment config
+                remote_poll_delay = 3*60; # should be in server/experiment config
                 for i in tqdm.tqdm(range(remote_poll_delay), "Time until next server poll"):
                     time.sleep(1)
     
