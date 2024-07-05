@@ -1,0 +1,47 @@
+{
+"aegir":{
+        // SSH access setup - needs to be set up in ~/.ssh/config
+        "hostname": "aegir",   // Name of the server in ~/.ssh/config
+
+        // Slurm setup
+        "account": "nn9297k",  
+        "partition": "aegir",  // Slurm-partition
+        "constraints": "v1",   // Slurm-constraints: desired CPU arch for running Veros on Aegir
+        "max_time":"23:59:59",
+        "n_cores":16, "n_cores_nx":4, "n_cores_ny":4,
+
+        // Veros run settings
+        "float_type":"float64",
+        "remote_outputdir":"/groups/ocean/mmroz",
+        "device_type":"cpu",
+        "backend": "numpy",
+        "n_cycles": 6,
+
+        // VerOpt settings
+        "n_evals_per_step": 16 // Number of parallel trials per opt step. TODO: Possibly make more flexible
+//TODO: template for slurm batch job
+    },
+
+    "lumi": {
+        // SSH access setup - needs to be set up in ~/.ssh/config
+        "hostname": "lumi",
+        
+        // Slurm setup
+        "account": "project_465000815",
+        "partition": "small-g",
+        "constraints": "",      // All LUMI small-g compute nodes are identical
+        "max_time":"71:59:59",  // small-g partition has max 72h time limit
+        "n_cores":1, "n_cores_nx":1, "n_cores_ny":1, // We run fully on GPU with only one CPU core 
+
+        // Veros run settings
+        "remote_outputdir":"~/ocean/veropt_results/",
+        "float_type":"float64",
+        "device_type":"gpu",
+        "backend": "jax",
+        "n_cycles": "All",
+
+        // VerOpt settings
+        "n_evals_per_step": 2
+//TODO: template for slurm batch job        
+    }
+}

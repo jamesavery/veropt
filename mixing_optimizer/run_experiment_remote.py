@@ -1,7 +1,7 @@
 from veropt import BayesOptimiser, load_optimiser
 from veropt.obj_funcs.mld_obj_function_remoteslurm import *
 from veropt.experiment import *
-import sys, json, datetime as dt
+import sys, pyjson5 as json, datetime as dt
 
 # Call as: pytho3 run_mld_remote.py <experiment_name> <remote_server_name>
 # E.g.: python3 run_mld_remote.py 4deg_tke_eke_wind_observations lumi
@@ -13,63 +13,19 @@ except:
 
 local_cfg = {
  'datadir':  "/data/ocean/",
- 'outputdir':"/data/ocean/veropt_results/"
+ 'outputdir':"/data/ocean/veropt_results/",
+ 'source_dir': "/home/avery/work/ocean/veropt/" 
 }
 
-
-
-############ COMPUTE SERVER SETTINGS - ############
-# TODO: All the server settings should live in a json file
-servers = {
-    "aegir":{
-        # SSH access setup - needs to be set up in ~/.ssh/config
-        'hostname': "aegir",   # Name of the server in ~/.ssh/config
-
-        # Slurm setup
-        'account': 'nn9297k',  
-        'partition': 'aegir',  # Slurm-partition
-        'constraints': "v1",   # Slurm-constraints: desired CPU arch for running Veros on Aegir
-        'max_time':'23:59:59',
-        'n_cores':16, 'n_cores_nx':4, 'n_cores_ny':4,
-
-        # Veros run settings
-        'float_type':"float64",
-        'remote_outputdir':"/groups/ocean/mmroz",
-        'device_type':"cpu",
-        'backend': "numpy",
-        'n_cycles': 6,
-
-        # VerOpt settings
-        'n_evals_per_step': 16 # Number of parallel trials per opt step. TODO: Possibly make more flexible
-#TODO: template for slurm batch job
-    },
-
-    "lumi": {
-        # SSH access setup - needs to be set up in ~/.ssh/config
-        'hostname': "lumi",
-        
-        # Slurm setup
-        'account': 'project_465000815',
-        'partition': 'small-g',
-        'constraints': None, # All LUMI small-g compute nodes are identical
-        'max_time':'71:59:59',
-        'n_cores':1, 'n_cores_nx':1, 'n_cores_ny':1,
-
-        # Veros run settings
-        'remote_outputdir':"~/ocean/veropt_results/",
-        'float_type':"float64",
-        'device_type':"gpu",
-        'backend': "jax",
-        'n_cycles': "All",
-
-        # VerOpt settings
-        'n_evals_per_step': 2
-#TODO: template for slurm batch job        
-    }
-}
-
-server_cfg = servers[remote_server_name]
-###################################################
+# READ IN SERVER CONFIG
+try:
+    # TODO: restructure as servers/{server_name}/server.json?        
+    with open(f"{local_cfg['source_dir']}/servers/servers.json","r") as f:
+        servers = json.load(f)
+    server_cfg = servers[remote_server_name]
+except Exception as e:
+    print(f"While reading {local_cfg['source_dir']}/servers/servers.json:\n\t{e}")
+    sys.exit(1)
 
 # READ IN EXPERIMENT CONFIG
 experiment_dir      = f"{local_cfg['outputdir']}/{experiment_name}"
@@ -78,21 +34,20 @@ try:
         expt_cfg = json.load(f)
 except Exception as e:
     print(f"While reading {experiment_dir}/experiment.json:\n\t{e}")
-    sys.exit(1)
+    sys.exit(2)
 
- 
 # READ IN OPTIMIZER CONFIG
 try: 
     with open(f"{experiment_dir}/{optimizer_config_name}.json","r") as f:
         opt_cfg = json.load(f)
 except Exception as e: 
     print(f"While reading {experiment_dir}/{optimizer_config_name}.json:\n\t{e}")
-    sys.exit(2)    
-    
+    sys.exit(3)    
 
-print(f"\n\nExperiment config: {expt_cfg}")
-print(f"Server config: {server_cfg}")
-print(f"Local machine config: {local_cfg}")
+
+print(f"\n\nExperiment config: {expt_cfg}\n")
+print(f"Server config: {server_cfg}\n")
+print(f"Local machine config: {local_cfg}\n")
 print(f"Optimisation config: {opt_cfg}\n\n")
 
 # SET UP OPTIMIZER 
