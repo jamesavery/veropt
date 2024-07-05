@@ -122,9 +122,9 @@ class MLD1ObjFun(ObjFunction):
         print("Finished setting up runs")
         self.transfer_jobs(setup_args)
         print("Finished transferring jobs")
+        jobids = self.start_jobs(setup_args)
+        print(f"Finished starting jobs, job ids: {jobids}") 
         sys.exit(0)
-
-        self.start_jobs(setup_args)
 
         for i in range(ncycles):
             self.check_jobs_status(setup_args)
@@ -189,20 +189,21 @@ class MLD1ObjFun(ObjFunction):
 
 
     def transfer_jobs(self, setup_args) -> None:
-        experiment_name = self.expt_cfg['experiment_name']
-        local_outputdir = self.local_cfg['outputdir']        
+        experiment_name  = self.expt_cfg  ['experiment_name']
+        local_outputdir  = self.local_cfg ['outputdir']  
+        remote_outputdir = self.server_cfg['outputdir']      
 
         setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1=c_k=0.1", "mld_experiment1-c_k-0.2",
 
         hostname = self.server_cfg['hostname']
+        remote_dir = f"{remote_outputdir}/ocean/veropt_results/{experiment_name}/"
 
         for setup in setup_names:
             setup_dir  = f"{local_outputdir}/{experiment_name}/{setup}"
-            remote_dir = f"{hostname}:ocean/veropt_results/{experiment_name}/"
 
-            print(f"Attempting: scp -Cr {setup_dir} {remote_dir}/")
+            print(f"Attempting: scp -Cr {setup_dir} {hostname}:{remote_dir}/")
             # TODO: Use python fabric module for error handling
-            pipe = subprocess.Popen(["scp","-Cr", setup_dir, f"{remote_dir}/"],
+            pipe = subprocess.Popen(["scp","-Cr", setup_dir, f"{hostname}:{remote_dir}/"],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True)
             result = pipe.stdout.read()
@@ -211,38 +212,46 @@ class MLD1ObjFun(ObjFunction):
                 print(f"Transferred {setup_dir} to {remote_dir} with result: {result}")
             else:
                 print(f"Error transferring {setup_dir} to {remote_dir}")
-                print(f"Error: {stderr}")
+                print(f"Error output was:\n{stderr}")
                 print(f"Aborting.\n\n")
-                sys.exit(1)
+                sys.exit(4)
         
 
     def start_jobs(self, setup_args) -> None:
         experiment_name = self.expt_cfg['experiment_name']
-        local_outputdir = self.local_cfg['outputdir']                
-        #self.startup_jobs = {} # remove
+        remote_outputdir = self.server_cfg['outputdir']
 
         setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1-c_k-0.1", "mld_experiment1-c_k-0.2",
         hostname = self.server_cfg['hostname']
 
+        jobids = []
         for setup in setup_names:
-            print(f"\nSubmitting job {hostname}:ocean/{experiment_name}/{setup}/veros_batch.sh")            
+            remote_dir = f"{remote_outputdir}/ocean/veropt_results/{experiment_name}/{setup}/"
+            command    = f"cd {remote_dir} && sbatch --parsable run_veros.slurm"
 
-            (f"ssh {hostname} 'cd ocean/{experiment_name}/{setup} && sbatch --parsable veros_batch.sh'")
+            print(f"\nSubmitting job {remote_dir}/run_veros.slurm")            
 
-            pipe = subprocess.Popen(["ssh", hostname, 
-                                     f"'cd ocean/{experiment_name}/{setup} && sbatch --parsable veros_batch.sh'"],
+            print(f"ssh {hostname} '{command}'")
+
+            pipe = subprocess.Popen(["ssh", hostname, command],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True)
-            jobid = int(pipe.stdout.read())
-            stderr = pipe.stdout.read()
+            stdout = pipe.stdout.read()
+            stderr = pipe.stderr.read()
 
             if not stderr:
-                print(f"Submitted {jobid} for setup {setup}")
+                print(f"Got {stdout} after submitting setup {setup}")
+                print(f"Output was:\n{stdout}")
+                jobids += [int(l) for l in stdout.split('\n') if l.isdigit()]
                 #self.startup_jobs.update({setup: jobid}) # remove
                 #os.system('squeue -p aegir -j ' + jobid + ' > squeue.out')
             else:
-                print(f"Setup {setup} was not submitted, aborting...")
-                sys.exit(1)
+                print(f"Submission of {setup} failed.")
+                print(f"Error output was:\n{stderr}")
+                print(f"Aborting.\n\n")
+                sys.exit(5)
+        
+        return jobids
 
 
     def check_jobs_status(self, setup_args) -> None:
