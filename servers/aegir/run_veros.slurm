@@ -8,7 +8,6 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --gpus-per-task=0
 #SBATCH --mem=0
-#SBATCH --output={setup_name}.out
 
 if [ X"$SLURM_STEP_ID" = "X" -a X"$SLURM_PROCID" = "X"0 ]
 then
@@ -39,5 +38,5 @@ conda activate veros_jax_cpu
 veros resubmit -i {setup_name} -n {n_cycles} -l {cycle_length} \
 -c 'mpiexec -n {n_cores} -- veros run {setup_name}.py \
 -b {backend} -n {n_cores_nx} {n_cores_ny} \
---float-type {float_type}' \
+--device {device_type} --float-type {float_type}' \
 --callback 'sbatch run_veros.slurm'
