@@ -1,6 +1,6 @@
-import os, sys, json, stat, time, tqdm, shutil, subprocess
+import os, sys, stat, time, tqdm, shutil, subprocess
 from dataclasses import dataclass, field
-import xarray as xr, numpy as np
+import xarray as xr, numpy as np, pyjson5 as json
 from veropt import ObjFunction
 
 
@@ -44,9 +44,10 @@ def calc_y(optimized_dataset, target_dataset, lat_range):
 
 
 class MLD1ObjFun(ObjFunction):
-    def __init__(self, 
+    def __init__(self, expt_state,
                  expt_cfg, server_cfg, local_cfg): 
 
+        self.expt_state = expt_state
         self.expt_cfg   = expt_cfg
         self.server_cfg = server_cfg
         self.local_cfg  = local_cfg         
@@ -61,7 +62,10 @@ class MLD1ObjFun(ObjFunction):
         experiment_name = expt_cfg['experiment_name']
 
         self.target_directory = f"{local_datadir}/{target_type}/{experiment_type}"
-        self.target_dataset = xr.open_dataset(f"{self.target_directory}/{expt_cfg['target_filename']}.nc")
+        self.target_dataset   = xr.open_dataset(f"{self.target_directory}/{expt_cfg['target_filename']}.nc")
+        self.state_filename   = f"{local_outputdir}/{experiment_name}/experiment_state.json"        
+        self.source_file_path = f"{local_outputdir}/{experiment_name}/experiment.py"
+        self.assets_file_path = f"{local_outputdir}/{experiment_name}/assets.json"
 
         # optimiser setup
         self.param_list_filename = f'{local_outputdir}/{experiment_name}/param_list_{experiment_name}.txt'
@@ -75,15 +79,11 @@ class MLD1ObjFun(ObjFunction):
         n_objs = expt_cfg['n_objectives']
         
         # TODO: Potentially not none - should live in... experiment.json 
+        # TODO: Ask Marta what exactly these do again.
         init_vals = None
         stds = None
 
-        # slurm setup 
-        # TODO: Gradually move to server configuation
-        # TODO: Also clean up to reflect structure
-        self.sleeping_time: int = 10 # in seconds
-        self.source_file_path: str = f"{local_outputdir}/{experiment_name}/experiment.py"
-        self.assets_file_path: str = f"{local_outputdir}/{experiment_name}/assets.json"
+        self.sleeping_time: int = 10 # in seconds. TODO: Move to config (server or experiment?)
 
         super().__init__(self.mldObjFunc, bounds, len(param_names), n_objs, init_vals, stds)
 
@@ -116,23 +116,27 @@ class MLD1ObjFun(ObjFunction):
             param_val_strings.append(param_val_string)
 
         print(setup_args)
-        self.setup_runs(setup_args)
+        step_points = self.setup_runs(setup_args) 
         print("Finished setting up runs")
-        self.transfer_jobs(setup_args)
+        self.transfer_jobs(step_points)        
         print("Finished transferring jobs")
-        jobids = self.start_jobs(setup_args)
-        print(f"Finished starting jobs, job ids: {jobids}") 
+        job_ids   = self.start_jobs(step_points)
+        print(f"Finished starting jobs, job ids: {dict(zip(step_points,job_ids))}") 
 
         for i in range(n_cycles):
-            self.check_jobs_status(setup_args, jobids)
+            self.check_jobs_status(setup_args, dict(job_ids)
         
         self.transfer_results(setup_args)
+        sys.exit(0)
 
         setup_names = [f"{experiment_name}={arg}" for arg in setup_args]
 
-        for setup, param_val_string in zip(setup_names, param_val_strings):
-            optimized_filepath = f"{local_outputdir}/{experiment_name}/{setup}"
-            optimized_filename = f"/{setup}.{str(ncycles-1).zfill(4)}.averages"
+        #TODO: Different filename scheme for .nc-files.
+        for i in range(len(step_points)): 
+            point_id, setup, param_val_string = step_points[i], setup_names[i], param_val_strings[i]
+            optimized_filepath = f"{local_outputdir}/{experiment_name}/{setup}/"
+            optimized_filename = f"{setup}.{str(n_cycles-1).zfill(4)}.averages"
+            #optimized_filename = f"/{setup}.{str(n_cycles-1).zfill(4)}.averages"
 
             target_type = self.expt_cfg['target_type']
             if target_type == "ifremer":
@@ -156,27 +160,37 @@ class MLD1ObjFun(ObjFunction):
         return y
 
 
-    #TODO: Tidy up.    
     def setup_runs(self, setup_args) -> None:
         experiment_name = self.expt_cfg['experiment_name']
         local_outputdir = self.local_cfg['outputdir']     
 
         setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1=c_k=0.1", "mld_experiment1-c_k-0.2",
 
-        for setup in setup_names:
-            setup_dir = f"{local_outputdir}/{experiment_name}/{setup}"
+        step_points = []
+        for i, setup_name in enumerate(setup_names):
+            next_point = self.expt_state['next_point']
 
+            setup_dir = f"{local_outputdir}/{experiment_name}/point={next_point}"
+
+            # Write out parameters to setup_args.json
+            kv = setup_name.split("=")[1:] # TODO: '_' splits kv-pairs, '=' splits k and v
+            setup_args_dict = {kv[i]: float(kv[i + 1]) for i in range(0, len(kv), 2)}
+
+            with open(f"{setup_dir}/setup_args.json", "w") as f:
+                json.dump(setup_args_dict, f)
+
+            #TODO: Clean this up
             if not os.path.exists(setup_dir):
                 os.makedirs(setup_dir)
                 print(f"\nDirectory created: {setup_dir}")
             else:
                 print(f"\nDirectory exists: {setup_dir}")
 
-            if not os.path.isfile(f"{setup_dir}/{setup}.py"):
+            if not os.path.isfile(f"{setup_dir}/experiment.py"):
                 shutil.copy(self.source_file_path, f"{setup_dir}/experiment.py")
                 print(f"    File {self.source_file_path}.py was copied to: {setup_dir}")
             else:
-                print(f"    File exists: {setup_dir}/{setup}.py")
+                print(f"    File exists: {setup_dir}/experiment.py")
 
             if not os.path.isfile(f"{setup_dir}/assets.json"):
                 shutil.copy(self.assets_file_path, f"{setup_dir}/assets.json")
@@ -184,22 +198,31 @@ class MLD1ObjFun(ObjFunction):
             else:
                 print(f"    File exists: {setup_dir}/assets.json")
 
-            batch_script_str = self.make_batch_script(setup)
+            batch_script_str = self.make_batch_script(setup_name, next_point)
             _write_batch_script(f"{setup_dir}/run_veros.slurm", batch_script_str)
 
+            # Assign parameters to the point number in the experiment state.
+            # This allows easy reproduction of results, rerunning failed point runs, plotting, etc.
+            self.expt_state['points'][next_point] = setup_args_dict
+            self.expt_state['points'][next_point]['state'] = 'setup_created'
+            self.expt_state['next_point'] += 1        
+            step_points += [next_point]
+                
+        with open(self.state_filename,"w") as f:
+            json.dump(self.expt_state,f)
+        
+        return step_points
 
-    def transfer_jobs(self, setup_args) -> None:
+    def transfer_jobs(self, step_points) -> None:
         experiment_name  = self.expt_cfg  ['experiment_name']
         local_outputdir  = self.local_cfg ['outputdir']  
         remote_outputdir = self.server_cfg['outputdir']      
 
-        setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1=c_k=0.1", "mld_experiment1-c_k-0.2",
-
         hostname = self.server_cfg['hostname']
         remote_dir = f"{remote_outputdir}/ocean/veropt_results/{experiment_name}/"
 
-        for setup in setup_names:
-            setup_dir  = f"{local_outputdir}/{experiment_name}/{setup}"
+        for point_id in step_points:
+            setup_dir  = f"{local_outputdir}/{experiment_name}/point={point_id}"
 
             print(f"Attempting: scp -Cr {setup_dir} {hostname}:{remote_dir}/")
             # TODO: Use python fabric module for error handling
@@ -210,13 +233,17 @@ class MLD1ObjFun(ObjFunction):
             stderr = pipe.stderr.read()
             if not stderr:
                 print(f"Transferred {setup_dir} to {remote_dir} with result: {result}")
+                self.expt_state['points'][point_id]['state'] = 'job_transferred'
             else:
                 print(f"Error transferring {setup_dir} to {remote_dir}")
                 print(f"Error output was:\n{stderr}")
                 print(f"Aborting.\n\n")
-                sys.exit(4)
+                sys.exit(5)
 
-    def transfer_results(self, setup_args) -> None:
+        with open(self.state_filename,"w") as f:
+            json.dump(self.expt_state,f)
+
+    def transfer_results(self, step_points) -> None:
         experiment_name  = self.expt_cfg  ['experiment_name']
         local_outputdir  = self.local_cfg ['outputdir']  
         remote_outputdir = self.server_cfg['outputdir']      
@@ -228,8 +255,8 @@ class MLD1ObjFun(ObjFunction):
         for setup in setup_names:
             setup_dir = f"{local_outputdir}/{experiment_name}/{setup}"
 
-            print(f"Attempting: scp -Cr {hostname}:{remote_dir}/* {setup_dir}/")
-            pipe = subprocess.Popen(["scp","-Cr", f"{hostname}:{remote_dir}/\*", f"{setup_dir}/"],
+            print(f"Attempting: scp -Cr {hostname}:{remote_dir}/{setup}/* {setup_dir}/")
+            pipe = subprocess.Popen(["scp","-Cr", f"{hostname}:{remote_dir}/{setup}/*", f"{setup_dir}/"],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True)
             result = pipe.stdout.read()
@@ -237,23 +264,25 @@ class MLD1ObjFun(ObjFunction):
 
             if not stderr:
                 print(f"Transferred {remote_dir}/* to {setup_dir} with result: {result}")
+                self.expt_state['points'][point_id]['state'] = 'result_transferred'
             else:
                 print(f"Error transferring {remote_dir}/* to {setup_dir}")
                 print(f"Error output was:\n{stderr}")
                 print(f"Aborting.\n\n")
-                sys.exit(5)
+                sys.exit(6)
+        
+        with open(self.state_filename,"w") as f:
+            json.dump(self.expt_state,f)
         
 
-    def start_jobs(self, setup_args) -> None:
-        experiment_name = self.expt_cfg['experiment_name']
+    def start_jobs(self, step_points) -> None:
+        experiment_name  = self.expt_cfg['experiment_name']
         remote_outputdir = self.server_cfg['outputdir']
+        hostname         = self.server_cfg['hostname']
 
-        setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1-c_k-0.1", "mld_experiment1-c_k-0.2",
-        hostname = self.server_cfg['hostname']
-
-        jobids = []
-        for setup in setup_names:
-            remote_dir = f"{remote_outputdir}/ocean/veropt_results/{experiment_name}/{setup}/"
+        job_ids = []
+        for point_id in step_points:
+            remote_dir = f"{remote_outputdir}/ocean/veropt_results/{experiment_name}/{point_id}/"
             command    = f"cd {remote_dir} && sbatch --parsable run_veros.slurm"
 
             print(f"\nSubmitting job {remote_dir}/run_veros.slurm")            
@@ -266,20 +295,25 @@ class MLD1ObjFun(ObjFunction):
             stdout = pipe.stdout.read()
             stderr = pipe.stderr.read()
 
-            if not stderr:
-                print(f"Got {stdout} after submitting setup {setup}")
-                print(f"Output was:\n{stdout}")
-                jobids += [int(l) for l in stdout.split('\n') if l.isdigit()]
+            if not stderr and stdout.strip().isdigit():
+                print(f"Point {point_id} submitted successfully. Slurm Job ID: {stdout.strip()}")
+                job_id = int(stdout.strip())
+                self.expt_state['points'][point_id]['job_id'] = job_id
+                self.expt_state['points'][point_id]['state']  = "submitted"
+                job_ids += [job_id]
             else:
                 print(f"Submission of {setup} failed.")
                 print(f"Error output was:\n{stderr}")
                 print(f"Aborting.\n\n")
-                sys.exit(5)
-        
-        return jobids
+                sys.exit(7)
+
+        with open(self.state_filename,"w") as f:
+            json.dump(self.expt_state,f)
+
+        return job_ids
 
 
-    def check_jobs_status(self, setup_args, jobids) -> None:
+    def check_jobs_status(self) -> None:
         """JobId=43848356
            JobName=mld_experiment1
            JobState=RUNNING/PENDING
@@ -289,31 +323,28 @@ class MLD1ObjFun(ObjFunction):
         remote_outputdir = self.server_cfg['outputdir']
         hostname         = self.server_cfg['hostname']
 
-        setup_names = [f"{experiment_name}={arg}" for arg in setup_args] #  "mld_experiment1-c_k-0.1", "mld_experiment1-c_k-0.2",
-
-        # TODO: 
-        #  - For each jobid in jobids
-        #  -- Check if the job is: queued, running, completing or completed
-        #  -- If running, print the progress from slurm-{jobid}.out
-        #  -- If completed, remove the corresponding setup from submitted_jobs
-
         # TODO: 
         #  try/except: On error, cancel all jobs and clean up.
+        
+        # Let's check the status even of orphaned submitted jobs (say, if we've crashed)
+        pt_dict = self.expt_state['points']
+        submitted_points = [p for p in pd_dict 
+                            if pt_dict[point_id]['state'] == 'submitted' 
+                            or pt_dict[point_id]['state'] == 'running']
+        job_ids = [pt_dict[point_id]['job_id'] for point_id in submitted_points]
 
         pending_jobs = 0
-        for i in range(len(jobids)):
+        for i in range(len(job_ids)):
             pending_jobs |= (1 << i)
 
         while pending_jobs:
-            for i in range(len(jobids)):
-                jobid, setup = jobids[i], setup_names[i]
+            for i in range(len(job_ids)):
+                point_id, job_id = submitted_points[i], job_ids[i]
 
-                remote_dir = f"{remote_outputdir}/ocean/veropt_results/{experiment_name}/{setup}/"
-                log_file   = f"{remote_dir}/slurm-{jobid}.out"               
+                remote_dir = f"{remote_outputdir}/ocean/veropt_results/{experiment_name}/point={point_id}/"
+                log_file   = f"{remote_dir}/slurm-{job_id}.out"               
 
-
-
-                pipe = subprocess.Popen(["ssh", hostname, f"scontrol show job {jobid}"],
+                pipe = subprocess.Popen(["ssh", hostname, f"scontrol show job {job_id}"],
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         text=True)
                 stdout = pipe.stdout.read()
@@ -328,8 +359,9 @@ class MLD1ObjFun(ObjFunction):
                     print("Job {jd[JobId]}/{jd[JobName]} status: {jd[JobState]} (Reason: {jd[Reason]}).".format(jd=job_dict))
 
                 if job_dict['JobState'] == "COMPLETED" or "slurm_load_jobs error: Invalid job id specified" in stderr:
-                    print(f"{jobid} status: COMPLETED")
+                    print(f"{job_id} status: COMPLETED")
                     pending_jobs &= ~(1 << i)
+                    self.expt_state['points'][point_id]['state'] = 'completed'
 
                 if job_dict['JobState'] == "RUNNING":
                     pipe = subprocess.Popen(["ssh", hostname, f"tail -n 3 {log_file}"],
@@ -337,35 +369,31 @@ class MLD1ObjFun(ObjFunction):
                                             text=True)
                     stdout = pipe.stdout.read()
                     stderr = pipe.stderr.read()
-                    print(f"Progress of {jobid}:\n----------------------------------\n{stdout}\n----------------------------------\n")
+                    self.expt_state['points'][point_id]['state'] = 'completed'                    
+                    print(f"Progress of Point {point_id}/{job_id}:\n----------------------------------\n{stdout}\n----------------------------------\n")
 
             if pending_jobs:
                 print("\nThe following jobs are still pending or running: " )
-                for i in range(len(jobids)):
+                for i in range(len(job_ids)):
                     if pending_jobs & (1 << i):
-                        print(f"{jobids[i]}")
+                        print(f"Point {submitted_points[i]}, Slurm Job ID {job_ids[i]}")
 
-                remote_poll_delay = 3*60; # should be in server/experiment config
+                with open(self.state_filename,"w") as f:
+                    json.dump(self.expt_state,f)
+                    
+                remote_poll_delay = 2*60; # should be in server/experiment config
                 for i in tqdm.tqdm(range(remote_poll_delay), "Time until next server poll"):
                     time.sleep(1)
     
 
-
-    def make_batch_script(self, setup_name: str) -> str:
-        experiment_name = self.expt_cfg['experiment_name']
-        local_outputdir = self.local_cfg['outputdir']                
+    # Just builds the batch script string, no unexpected side effects like writing to files.
+    def make_batch_script(self, setup_name: str, point_id: int) -> str:
         local_sourcedir = self.local_cfg['source_dir']
         server_hostname = self.server_cfg['hostname']
-
-        dummy = setup_name.split("=")[1:]
-        setup_args_dict = {dummy[i]: float(dummy[i + 1]) for i in range(0, len(dummy), 2)}
-        with open(f"{local_outputdir}/{experiment_name}/{setup_name}/setup_args.txt", "w") as f:
-            json.dump(setup_args_dict, f)
 
         with open(f"{local_sourcedir}/servers/{server_hostname}/run_veros.slurm", "r") as f:
             batch_script_str = f.read()
         
-        template_substitutions = self.server_cfg | self.expt_cfg | {"setup_name": setup_name}
-        #print(f"template_substitutions: {template_substitutions}")
+        template_substitutions = self.server_cfg | self.expt_cfg | {"setup_name": setup_name, 'point_id': point_id}
 
         return batch_script_str.format(**template_substitutions)

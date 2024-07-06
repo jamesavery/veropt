@@ -17,6 +17,7 @@ local_cfg = {
  'source_dir': "/home/avery/work/ocean/veropt/" 
 }
 
+## TODO: Possibly move to ObjectFunction constructor?
 # READ IN SERVER CONFIG
 try:
     # TODO: restructure as servers/{server_name}/server.json?        
@@ -36,13 +37,32 @@ except Exception as e:
     print(f"While reading {experiment_dir}/experiment.json:\n\t{e}")
     sys.exit(2)
 
+# READ IN OR CREATE EXPERIMENT STATE
+state_filename = f"{experiment_dir}/experiment_state.json"
+if os.path.exists(state_filename):
+    try: 
+        with open(state_filename,"r") as f:
+            expt_state = json.load(f)
+    except Exception as e:
+        print(f"While reading {state_filename}:\n\t{e}")
+        sys.exit(3)
+else: 
+    expt_state = {'experiment_name': experiment_name,
+                 'experiment_dir': experiment_dir,
+                 'next_point': 0,
+                 'points': {}
+                 }
+    with open(state_filename,"w") as f:
+        json.dump(expt_state,f)
+    
+
 # READ IN OPTIMIZER CONFIG
 try: 
     with open(f"{experiment_dir}/{optimizer_config_name}.json","r") as f:
         opt_cfg = json.load(f)
 except Exception as e: 
     print(f"While reading {experiment_dir}/{optimizer_config_name}.json:\n\t{e}")
-    sys.exit(3)    
+    sys.exit(4)    
 
 
 print(f"\n\nExperiment config: {expt_cfg}\n")
@@ -51,7 +71,7 @@ print(f"Local machine config: {local_cfg}\n")
 print(f"Optimisation config: {opt_cfg}\n\n")
 
 # SET UP OPTIMIZER 
-obj_func = MLD1ObjFun(expt_cfg,server_cfg,local_cfg)
+obj_func = MLD1ObjFun(expt_state, expt_cfg,server_cfg,local_cfg)
 
 n_init_rounds    = opt_cfg['n_init_rounds']
 n_bayes_rounds   = opt_cfg['n_bayes_rounds']

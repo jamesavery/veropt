@@ -21,7 +21,7 @@ export CPU_BIND="map_cpu:x48,56,16,24,1,8,32,40"
 export SCRATCH_DIR=/dev/shm/veropt/{setup_name}
 export RESULT_DIR=$PWD
 
-echo "Copying job files to scratch memory file system $SCRATCH_DIR"
+echo "Copying job files for point {point_id} to scratch memory file system $SCRATCH_DIR"
 mkdir -p $SCRATCH_DIR
 cp -r ./* $SCRATCH_DIR
 rm $SCRATCH_DIR/slurm-$SLURM_JOB_ID.out
@@ -37,12 +37,12 @@ exec \$*
 EOF
 chmod +x ./select_gpu
 
-echo "Running VerOS with Singularity"
+echo "Running VerOS on {experiment_name} point {point_id}"
 srun singularity exec $VEROS_SIF_IMAGE ./select_gpu veros run --backend {backend} --device {device_type} --float-type {float_type} ./experiment.py
 
 rm -rf ./select_gpu
 
-echo "Copying back results from scratch space and cleaning up"
+echo "Copying back results for point {point_id} from scratch space and cleaning up"
 cp -r $SCRATCH_DIR/* $RESULT_DIR/
 rm -rf $SCRATCH_DIR
 cd $RESULT_DIR
