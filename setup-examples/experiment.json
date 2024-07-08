@@ -1,6 +1,8 @@
 {
     "experiment_name" : "mld_lumi_test",
     "experiment_type" : "mixed_layer_density",
+    "identifier" : "4deg", // Must match the identifier in the Veros setup experiment.py
+    "map_resolution": "4deg",
     "experiment_description" : "Test the remote slurm VerOpt objective function using the 4deg setup with 6d extended parameter space (TKE, EKE and bulk formula). The target is the 4x4 IFREMER map between 50S and 50N.",
     "cycle_length": 31104000,
     "lat_range" : [-52,50],
