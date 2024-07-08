@@ -17,7 +17,7 @@ local_cfg = {
  'source_dir': "/home/avery/work/ocean/veropt/" 
 }
 
-## TODO: Possibly move to ObjectFunction constructor?
+## TODO: Possibly move to ObjectFunction constructor
 # READ IN SERVER CONFIG
 try:
     # TODO: restructure as servers/{server_name}/server.json?        
@@ -52,9 +52,9 @@ else:
                  'next_point': 0,
                  'points': {}
                  }
-    with open(state_filename,"w") as f:
-        json.dump(expt_state,f)
-    
+    with open(state_filename,"wb") as f:
+        json.encode_io(expt_state,f)
+        
 
 # READ IN OPTIMIZER CONFIG
 try: 
