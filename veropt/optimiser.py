@@ -392,12 +392,17 @@ class BayesOptimiser:
         if self.obj_func.function:
 
             if self.normalise and self.data_fitted:
-                new_x = torch.tensor(self.normaliser_x.inverse_transform(suggested_steps))
-
+                print(f"suggested_steps = {suggested_steps}, shape = {suggested_steps.shape}")
+                print(f"suggested_steps.squeeze(0) = {suggested_steps.squeeze(0)}, shape = {suggested_steps.squeeze(0).shape}")
+                new_x = torch.tensor(self.normaliser_x.inverse_transform(suggested_steps.squeeze(0)))
+                print(f"new_x = {new_x}, shape = {new_x.shape}")                
+                new_x = new_x.unsqueeze(0)
+                print(f"new_x.unsqueeze(0) = {new_x}, shape = {new_x.shape}")
             else:
                 new_x = suggested_steps
 
             new_y = self.obj_func.run(new_x)
+            print(f"new_y = {new_y}")
 
             self.need_new_suggestions = True
 
@@ -413,7 +418,13 @@ class BayesOptimiser:
 
             suggested_steps = self.suggest_opt_steps()
 
-            new_x, new_y = self.evaluate_points(suggested_steps)
+            xy = self.evaluate_points(suggested_steps)
+            try:
+                new_x, new_y = xy
+            except Exception as e:
+                print(f"Error: {e}")
+                print(f"Suggested steps: {suggested_steps}\nxy: {xy}")
+                raise e
 
             print(f"new_x = {new_x}, new_y = {new_y}")
             self.add_new_points(new_x, new_y)
