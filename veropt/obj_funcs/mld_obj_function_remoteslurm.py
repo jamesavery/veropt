@@ -48,13 +48,14 @@ def calc_y(optimized_dataset, target_dataset, lat_range):
 
 class MLD1ObjFun(ObjFunction):
     def __init__(self, expt_state,
-                 expt_cfg, server_cfg, local_cfg): 
+                 expt_cfg, server_cfg, local_cfg, opt_cfg): 
 
         self.expt_state = expt_state
         self.expt_cfg   = expt_cfg
         self.server_cfg = server_cfg
-        self.local_cfg  = local_cfg         
-
+        self.local_cfg  = local_cfg
+        self.opt_cfg    = opt_cfg
+        
         # location, name, latitude range and resolution of the target mixed layer depth (MLD) map
         #target_type: "simulated_target" | "ifremer"
         #experiment_type: "mixed_layer_depth" | "..."
@@ -83,27 +84,32 @@ class MLD1ObjFun(ObjFunction):
         
         # TODO: Potentially not none - should live in... experiment.json 
         # TODO: Ask Marta what exactly these do again.
-        init_vals = None
-        stds = None
+        init_vals = None # Are these the already evaluated points? In that case, we should get these from expt_state['points'].
+        stds = None      # Where do we obtain the standard deviations from?
 
         self.sleeping_time: int = 10 # in seconds. TODO: Move to config (server or experiment?)
 
         super().__init__(self.mldObjFunc, bounds, len(param_names), n_objs, init_vals, stds)
 
-
     def mldObjFunc(self, new_x):
 
-        experiment_name = self.expt_cfg['experiment_name']
-        local_outputdir = self.local_cfg['outputdir']
+
+
+        print(f"Running objective function with new_x: {new_x}")
         n_cycles = self.server_cfg['n_cycles']
         
+        n_evals_per_step   = self.opt_cfg['n_evals_per_step']
+        max_parallel_evals = self.server_cfg['max_parallel_evals']
+        n_parallel_evals   = min(n_evals_per_step, max_parallel_evals)
+
         n_points = len(new_x.numpy()[0])
         n_params = len(new_x.numpy()[0][0])
         setup_args = ()
-        y = []
-        param_val_strings = []
         param_names = self.expt_cfg['param_names']
 
+        assert(n_points == n_evals_per_step)
+
+        # TODO: Make a function param_val_string from dict to string, and param_string_val from string to dict instead.
         for i in range(n_points):
             # in new_x.numpy()[i][j][k]
             # index i: objective index (as default, n_obj = 1)
@@ -116,25 +122,42 @@ class MLD1ObjFun(ObjFunction):
                 param_val_string += f"{param_val},"
                 setup_string += f"{param_name}={param_val}="
             setup_args += (setup_string[:-1],)
-            param_val_strings.append(param_val_string)
+            # param_val_strings.append(param_val_string)
 
         # TODO: Deal with partially or fully completed but unprocessed points (from prior crash)
 
-        print(setup_args)
-        step_points = self.setup_runs(setup_args) 
-        print("Finished setting up runs")
-        self.transfer_jobs(step_points)        
-        print("Finished transferring jobs")
-        job_ids   = self.start_jobs(step_points)
-        print(f"Finished starting jobs, job ids: {dict(zip(step_points,job_ids))}") 
-
-        for i in range(n_cycles):
-            self.check_jobs_status()
+        job_ids = []
+        step_points = self.setup_runs(setup_args)  # Setup runs for new points. TODO: setup_args from new_x, get rid of setup_args here.
+        for i in range(0, n_points, n_parallel_evals):
+            parallel_points = step_points[i*n_parallel_evals:(i+1)*n_parallel_evals]
+            self.transfer_jobs(parallel_points)          # Transfer new jobs (state=='setup_created') to remote server. TODO: Use expt_state['points'] instead of step_points
+            parallel_job_ids = self.start_jobs(parallel_points)   # Start new slurm jobs (state=='job_transferred') on remote server. TODO: Use expt_state['points'] instead of step_points
         
-        self.transfer_results(step_points)
+            print(f"Finished starting jobs, job ids: {dict(zip(parallel_points,parallel_job_ids))}") # TODO: Use expt_state['points'] instead of step_points
 
-        for i in range(len(step_points)): 
-            point_id, param_val_string = step_points[i], param_val_strings[i]
+            for i in range(n_cycles): # TODO: Figure out how to handle n_cycles better.
+                self.check_jobs_status(parallel_job_ids)
+        
+            self.transfer_results(parallel_points)
+            job_ids += parallel_job_ids
+
+        return self.process_results(step_points)                   # Process results from prior cycles in expt_state
+
+
+    def process_results(self, ready_points):
+        # Extract completed and back-transferred results from expt_state
+        local_outputdir = self.local_cfg['outputdir']
+        experiment_name = self.expt_cfg ['experiment_name']
+
+        points = self.expt_state['points']
+        n_evals_per_step = self.opt_cfg['n_evals_per_step']
+        n_objs           = self.expt_cfg['n_objectives']
+        if(len(ready_points) < n_evals_per_step): return None
+
+        y = np.zeros((n_evals_per_step,n_objs))
+        for i in range(n_evals_per_step): 
+            point_id = ready_points[i]
+
             optimized_filepath = f"{local_outputdir}/{experiment_name}/point={point_id}/"
             optimized_filename = f"{self.expt_cfg['identifier']}.averages"
             #optimized_filename = f"/{setup}.{str(n_cycles-1).zfill(4)}.averages"
@@ -148,18 +171,19 @@ class MLD1ObjFun(ObjFunction):
             else:
                 raise ValueError("Target type should be either 'ifremer' or 'simulated_target'.")
 
-            new_y = calc_y(optimized_dataset, self.target_dataset, lat_range=self.expt_cfg['lat_range'])
-            y.append(new_y)
+            # TODO: Veropt change: we should be minimizing instead of maximizing, since that's the canonical thing to do.
+            y[i] = calc_y(optimized_dataset, self.target_dataset, lat_range=self.expt_cfg['lat_range'])
 
-            with open(self.param_list_filename, "a") as file:
-                file.write(f"\n{param_val_string},{new_y}")
+            points[point_id]['state'] = 'result_processed' #TODO: completed?
+#            with open(self.param_list_filename, "a") as file:
+#                file.write(f"\n{param_val_string},{new_y}")
 
-        if len(y) == 0:
-            y = y[0]
-        else: pass
+        write_json(self.state_filename,self.expt_state)
 
-        return y
-
+        if len(y) == 1:
+            return y[0]
+        else:
+            return y
 
     def setup_runs(self, setup_args) -> None:
         experiment_name = self.expt_cfg['experiment_name']
@@ -206,21 +230,29 @@ class MLD1ObjFun(ObjFunction):
         for point_id in step_points:
             setup_dir  = f"{local_outputdir}/{experiment_name}/point={point_id}"
 
-            print(f"Attempting: scp -Cr {setup_dir} {hostname}:{remote_dir}/")
-            # TODO: Use python fabric module for error handling
-            pipe = subprocess.Popen(["scp","-Cr", setup_dir, f"{hostname}:{remote_dir}/"],
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    text=True)
-            result = pipe.stdout.read()
-            stderr = pipe.stderr.read()
-            if not stderr:
-                print(f"Transferred {setup_dir} to {remote_dir} with result: {result}")
-                self.expt_state['points'][point_id]['state'] = 'job_transferred'
-            else:
-                print(f"Error transferring {setup_dir} to {remote_dir}")
-                print(f"Error output was:\n{stderr}")
-                print(f"Aborting.\n\n")
-                sys.exit(5)
+            success = False
+            tries = 0
+            max_tries = 3 # TODO: Move to config
+            while(not success and tries < max_tries):
+                print(f"Attempting: scp -Cr {setup_dir} {hostname}:{remote_dir}/")
+                # TODO: Use python fabric module for error handling
+                pipe = subprocess.Popen(["scp","-Cr", setup_dir, f"{hostname}:{remote_dir}/"],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True)
+                result = pipe.stdout.read()
+                stderr = pipe.stderr.read()
+                if not stderr:
+                    print(f"Transferred {setup_dir} to {remote_dir} with result: {result}")
+                    self.expt_state['points'][point_id]['state'] = 'job_transferred'
+                    success = True
+                else:
+                    print(f"Error transferring {setup_dir} to {remote_dir}")
+                    print(f"Error output was:\n{stderr}")
+                    tries += 1
+                    print(f"Retrying in {tries*60} seconds.")
+                    time.sleep(tries*60) # TODO: Move to config
+                    #print(f"Aborting.\n\n")
+                    #sys.exit(5)
 
         write_json(self.state_filename,self.expt_state)
 
@@ -236,36 +268,43 @@ class MLD1ObjFun(ObjFunction):
             remote_dir = f"{remote_outputdir}/ocean/veropt_results/{experiment_name}/point={point_id}"            
 
 #TODO: rsync instead of scp
-            print(f"Attempting: scp -Cr {hostname}:{remote_dir}/* {local_dir}/")
-            pipe = subprocess.Popen(["scp","-Cr", f"{hostname}:{remote_dir}/*", f"{local_dir}/"],
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    text=True)
-            result = pipe.stdout.read()
-            stderr = pipe.stderr.read()
-
-            if not stderr:
-                print(f"Transferred {remote_dir}/* to {local_dir} with result: {result}")
-                self.expt_state['points'][point_id]['state'] = 'result_transferred'
-
-                # Don't delete the whole home directory by accident
-                assert(len(remote_dir) > len(self.server_cfg['outputdir'])+10) 
-                print(f"Attempting remote cleanup: ssh {hostname} 'rm -rf {remote_dir}'")
-                pipe = subprocess.Popen(["ssh",hostname, f"rm -rf {remote_dir}"],
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    text=True)
+            success = False
+            tries = 0
+            max_tries = 3 # TODO: Move to config
+            while(not success and tries < max_tries):
+                print(f"Attempting: scp -Cr {hostname}:{remote_dir}/* {local_dir}/")
+                pipe = subprocess.Popen(["scp","-Cr", f"{hostname}:{remote_dir}/*", f"{local_dir}/"],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True)
                 result = pipe.stdout.read()
                 stderr = pipe.stderr.read()
 
                 if not stderr:
-                    print(f"Remote cleanup of {remote_dir} successful: {result}")
+                    print(f"Transferred {remote_dir}/* to {local_dir} with result: {result}")
+                    self.expt_state['points'][point_id]['state'] = 'result_transferred'
+                    success = True
+                # Don't delete the whole home directory by accident
+                    assert(len(remote_dir) > len(self.server_cfg['outputdir'])+10) 
+                    print(f"Attempting remote cleanup: ssh {hostname} 'rm -rf {remote_dir}'")
+                    pipe = subprocess.Popen(["ssh",hostname, f"rm -rf {remote_dir}"],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True)
+                    result = pipe.stdout.read()
+                    stderr = pipe.stderr.read()
+
+                    if not stderr:
+                        print(f"Remote cleanup of {remote_dir} successful: {result}")
+                    else:
+                        print(f"Error cleaning up {remote_dir}")
+                        print(f"Error output was:\n{stderr}")
                 else:
-                    print(f"Error cleaning up {remote_dir}")
+                    print(f"Error transferring {remote_dir}/* to {remote_dir}")
                     print(f"Error output was:\n{stderr}")
-            else:
-                print(f"Error transferring {remote_dir}/* to {remote_dir}")
-                print(f"Error output was:\n{stderr}")
-                print(f"Aborting.\n\n")
-                sys.exit(6)
+                    tries += 1
+                    print(f"Retrying in {tries*60} seconds.")
+                    time.sleep(tries*60) # TODO: Move to config
+                    #print(f"Aborting.\n\n")
+                    #sys.exit(6)
         
         write_json(self.state_filename,self.expt_state)
         
@@ -284,30 +323,38 @@ class MLD1ObjFun(ObjFunction):
 
             print(f"ssh {hostname} '{command}'")
 
-            pipe = subprocess.Popen(["ssh", hostname, command],
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    text=True)
-            stdout = pipe.stdout.read()
-            stderr = pipe.stderr.read()
+            success = False
+            tries = 0
+            max_tries = 3 # TODO: Move to config
+            while(not success and tries < max_tries):
+                pipe = subprocess.Popen(["ssh", hostname, command],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True)
+                stdout = pipe.stdout.read()
+                stderr = pipe.stderr.read()
 
-            if not stderr and stdout.strip().isdigit():
-                print(f"Point {point_id} submitted successfully. Slurm Job ID: {stdout.strip()}")
-                job_id = int(stdout.strip())
-                self.expt_state['points'][point_id]['job_id'] = job_id
-                self.expt_state['points'][point_id]['state']  = "submitted"
-                job_ids += [job_id]
-            else:
-                print(f"Submission of point={point_id} failed.")
-                print(f"Error output was:\n{stderr}")
-                print(f"Aborting.\n\n")
-                sys.exit(7)
+                if not stderr and stdout.strip().isdigit():
+                    print(f"Point {point_id} submitted successfully. Slurm Job ID: {stdout.strip()}")
+                    job_id = int(stdout.strip())
+                    self.expt_state['points'][point_id]['job_id'] = job_id
+                    self.expt_state['points'][point_id]['state']  = "submitted"
+                    job_ids += [job_id]
+                    success = True
+                else:
+                    print(f"Submission of point={point_id} failed.")
+                    print(f"Error output was:\n{stderr}")
+                    tries += 1
+                    print(f"Retrying in {tries*60} seconds.")
+                    time.sleep(tries*60) # TODO: Move to config
+                    #print(f"Aborting.\n\n")
+                    #sys.exit(7)
 
         write_json(self.state_filename,self.expt_state)
 
         return job_ids
 
 
-    def check_jobs_status(self) -> None:
+    def check_jobs_status(self, job_ids) -> None:
         """JobId=43848356
            JobName=mld_experiment1
            JobState=RUNNING/PENDING
@@ -354,7 +401,7 @@ class MLD1ObjFun(ObjFunction):
                 if job_dict['JobState'] == "COMPLETED" or "slurm_load_jobs error: Invalid job id specified" in stderr:
                     print(f"{job_id} status: COMPLETED")
                     pending_jobs &= ~(1 << i)
-                    self.expt_state['points'][point_id]['state'] = 'completed'
+                    self.expt_state['points'][point_id]['state'] = 'job_completed'
 
                 if job_dict['JobState'] == "RUNNING":
                     pipe = subprocess.Popen(["ssh", hostname, f"tail -n 3 {log_file}"],
@@ -362,8 +409,14 @@ class MLD1ObjFun(ObjFunction):
                                             text=True)
                     stdout = pipe.stdout.read()
                     stderr = pipe.stderr.read()
-                    self.expt_state['points'][point_id]['state'] = 'completed'                    
+                    self.expt_state['points'][point_id]['state'] = 'job_running'
                     print(f"Progress of Point {point_id}/{job_id}:\n----------------------------------\n{stdout}\n----------------------------------\n")
+
+                if stderr and "slurm_load_jobs error: Invalid job id specified" not in stderr:
+                    print(f"Error checking job {job_id}: {stderr}")
+                    print(f"Continuing in 60 seconds.")
+                    time.sleep(60) # TODO: Move to config
+                    continue
 
             if pending_jobs:
                 print("\nThe following jobs are still pending or running: " )
