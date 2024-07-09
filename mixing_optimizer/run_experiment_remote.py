@@ -6,10 +6,12 @@ import sys, pyjson5 as json, datetime as dt
 # Call as: pytho3 run_mld_remote.py <experiment_name> <remote_server_name>
 # E.g.: python3 run_mld_remote.py 4deg_tke_eke_wind_observations lumi
 try: 
-    experiment_name, remote_server_name, optimizer_config_name = sys.argv[1:4]
+    experiment_name, remote_server_name = sys.argv[1:3]
 except:
-    print(f"Syntax: python3 run_mld_remote.py <experiment_name> <remote_server_name> <optimizer_config_name>")
+    print(f"Syntax: python3 run_mld_remote.py <experiment_name> <remote_server_name> [optimizer_config_name='optimizer']")
     sys.exit(1)
+if(len(sys.argv) > 3):
+    optimizer_config_name = sys.argv[3]
 
 local_cfg = {
  'datadir':  "/data/ocean/",
@@ -71,11 +73,11 @@ print(f"Local machine config: {local_cfg}\n")
 print(f"Optimisation config: {opt_cfg}\n\n")
 
 # SET UP OPTIMIZER 
-obj_func = MLD1ObjFun(expt_state, expt_cfg,server_cfg,local_cfg)
+obj_func = MLD1ObjFun(expt_state, expt_cfg,server_cfg,local_cfg, opt_cfg)
 
 n_init_rounds    = opt_cfg['n_init_rounds']
 n_bayes_rounds   = opt_cfg['n_bayes_rounds']
-n_evals_per_step = server_cfg['n_evals_per_step']
+n_evals_per_step = opt_cfg['n_evals_per_step']
 
 optimiser = BayesOptimiser(n_init_rounds*n_evals_per_step, n_bayes_rounds*n_evals_per_step, obj_func, n_evals_per_step=n_evals_per_step)
 optimiser.model.constraint_dict_list[0]["covar_module"]["raw_lengthscale"] = opt_cfg['raw_lengthscale']
