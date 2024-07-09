@@ -18,7 +18,7 @@
         "n_cycles": 6,
 
         // VerOpt settings
-        "n_evals_per_step": 16 // Number of parallel trials per opt step. TODO: Possibly make more flexible
+        "max_parallel_evals": 16 // Number of parallel trials per opt step. TODO: Possibly make more flexible
 
     },
 
@@ -29,7 +29,7 @@
         
         // Slurm setup
         "account": "project_465000815",
-        "partition": "dev-g",
+        "partition": "small-g",
         "constraints": "",      // All LUMI small-g compute nodes are identical
         "max_time": "00:30:00", 
         //"max_time":"71:59:59",  // small-g partition has max 72h time limit
@@ -43,6 +43,6 @@
         "n_cycles": 1,
 
         // VerOpt settings
-        "n_evals_per_step": 2
+        "max_parallel_evals": 8
     }
 }
