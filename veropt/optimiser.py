@@ -76,13 +76,17 @@ class BayesOptimiser:
     def __init__(self, n_init_points, n_bayes_points, obj_func: ObjFunction, acq_func: AcqFunction = None,
                  model: BayesOptModel = None, obj_weights=None, using_priors=False, normalise=True,
                  points_before_fitting=15, test_mode=False, n_evals_per_step=1, file_name=None, verbose=True,
-                 normaliser=None, renormalise_each_step=None):
+                 normaliser=None, renormalise_each_step=None, random_seed=None):
 
         self.n_init_points = n_init_points
         self.n_bayes_points = n_bayes_points
         self.normalise = normalise
 
         self.n_evals_per_step = n_evals_per_step
+
+        if(random_seed is not None):
+            torch.manual_seed(random_seed)
+            np.random.seed(random_seed)
 
         if n_init_points % n_evals_per_step > 0:
             self.n_init_points = n_init_points - (n_init_points % n_evals_per_step)
@@ -392,17 +396,25 @@ class BayesOptimiser:
         if self.obj_func.function:
 
             if self.normalise and self.data_fitted:
-                print(f"suggested_steps = {suggested_steps}, shape = {suggested_steps.shape}")
-                print(f"suggested_steps.squeeze(0) = {suggested_steps.squeeze(0)}, shape = {suggested_steps.squeeze(0).shape}")
+#                print(f"suggested_steps = {suggested_steps}, shape = {suggested_steps.shape}")
+#                print(f"suggested_steps.squeeze(0) = {suggested_steps.squeeze(0)}, shape = {suggested_steps.squeeze(0).shape}")
                 new_x = torch.tensor(self.normaliser_x.inverse_transform(suggested_steps.squeeze(0)))
-                print(f"new_x = {new_x}, shape = {new_x.shape}")                
+#                print(f"new_x = {new_x}, shape = {new_x.shape}")                
                 new_x = new_x.unsqueeze(0)
-                print(f"new_x.unsqueeze(0) = {new_x}, shape = {new_x.shape}")
+#                print(f"new_x.unsqueeze(0) = {new_x}, shape = {new_x.shape}")
             else:
                 new_x = suggested_steps
 
-            new_y = self.obj_func.run(new_x)
-            print(f"new_y = {new_y}")
+            result = self.obj_func.run(new_x)
+            if len(result)==2:
+                completed_x, completed_y = result
+            else:
+                completed_x, completed_y = new_x, result
+
+            if(new_x != completed_x):
+                print(f"new_x = {new_x} != {completed_x} = completed_x, but that is OK. Maybe.")
+            
+            new_x, new_y = completed_x, completed_y
 
             self.need_new_suggestions = True
 
