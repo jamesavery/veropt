@@ -3,9 +3,27 @@ from dataclasses import dataclass, field
 import xarray as xr, numpy as np, pyjson5 as json
 from veropt import ObjFunction
 
+# TODO: Veropt change: we should be minimizing instead of maximizing, since that's the canonical thing to do.
+# DONE: identifier should be same as experiment.json's experiment_name. Fix so that it is read from experiment.json and written to setup_args.txt
+# TODO: Return partially completed set of points (opt_cfg['required_completed_fraction'] = 0.5) instead of waiting for slowest
+# TODO: Make and automatically transfer scripts to process all remote points in one go (to reduce network overhead)
+# TODO: Maybe even process results on the server, and only copy back all files if in the top N? (Specify what to retain if not in top N)
+# TODO: Also generate plots on the fly for debugging and monitoring. Plots per point, and optimization progress plots.
+# TODO: Sleep time and slurm-maxtime proportional to resolution and simulation time. 
+# TODO: Make checkpointing robust
+#        - Check what Ida already has
+#        - Replay old points in state-file
+#        - Deal with partially or fully completed but unprocessed points (from prior crash)
+#        - DONE Return both x and y (allowing points to be returned in different order than requested). Think about asyncronous scheme.
+#        - Keep track of best N points. Whenever a best-point is pushed out of the list, extract "keep for all" data and delete rest.
+
 def write_json(filename, data):
     with open(filename,"wb") as f:
         json.encode_io(data,f)
+
+def read_json(filename):
+    with open(filename,"rb") as f:
+        return json.decode_io(f)
 
 def write_batch_script(file_path_name: str, string: str) -> None:
     with open(file_path_name, 'w+') as file:
@@ -14,10 +32,17 @@ def write_batch_script(file_path_name: str, string: str) -> None:
     st = os.stat(file_path_name)
     os.chmod(file_path_name, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH )
 
+def point_xs(point_id, param_list, expt_state):
+    point_params = expt_state['points'][point_id]['params']
+    return [point_params[param] for param in param_list]
 
 def correct_coords(optimized_filename, res):
+    if os.path.exists(f"{optimized_filename}_corr_coords.nc"):
+        print(f"correct_coords called on already coord-corrected: {optimized_filename}.nc")
+        return
+    
     ds = xr.open_dataset(f"{optimized_filename}.nc")
-    if res == "4deg":
+    if   res == "4deg":
         new_xu_coords = np.concatenate([np.arange(90., 360., 4.), np.arange(2., 90., 4.)])
         new_xt_coords = np.concatenate([np.arange(88., 360., 4.), np.arange(0., 88., 4.)])
     elif res == "1deg":
@@ -31,6 +56,7 @@ def correct_coords(optimized_filename, res):
     ds.coords['xu'] = new_xu_coords
     ds = ds.sortby(ds.xu)
     ds.to_netcdf(f'{optimized_filename}_corr_coords.nc')
+    os.remove(f"{optimized_filename}.nc")
 
 
 def calc_y(optimized_dataset, target_dataset, lat_range):  
@@ -88,26 +114,31 @@ class MLD1ObjFun(ObjFunction):
         stds = None      # Where do we obtain the standard deviations from?
 
         self.sleeping_time: int = 10 # in seconds. TODO: Move to config (server or experiment?)
+        year_in_seconds = 24*60*60*360 # TODO: Can we get veros to do 365 day years? 
+        if(self.expt_cfg['map_resolution'] == "1deg"):
+            self.remote_poll_delay = int(1200*self.expt_cfg["simulation_time"]/year_in_seconds); # should be in server/experiment config
+        else: # TODO: 4deg
+            self.remote_poll_delay = int(  12*self.expt_cfg["simulation_time"]/year_in_seconds)  # should be in server/experiment config            
 
         super().__init__(self.mldObjFunc, bounds, len(param_names), n_objs, init_vals, stds)
 
     def mldObjFunc(self, new_x):
-
-
 
         print(f"Running objective function with new_x: {new_x}")
         n_cycles = self.server_cfg['n_cycles']
         
         n_evals_per_step   = self.opt_cfg['n_evals_per_step']
         max_parallel_evals = self.server_cfg['max_parallel_evals']
-        n_parallel_evals   = min(n_evals_per_step, max_parallel_evals)
+        n_parallel_evals   = min(n_evals_per_step, max_parallel_evals)        
 
         n_points = len(new_x.numpy()[0])
         n_params = len(new_x.numpy()[0][0])
         setup_args = ()
         param_names = self.expt_cfg['param_names']
 
-        assert(n_points == n_evals_per_step)
+        if(n_points != n_evals_per_step):
+            print(f"n_points={n_points} != n_evals_per_step={n_evals_per_step}.")
+            print(f"new_x = {new_x}")
 
         # TODO: Make a function param_val_string from dict to string, and param_string_val from string to dict instead.
         for i in range(n_points):
@@ -135,14 +166,29 @@ class MLD1ObjFun(ObjFunction):
         
             print(f"Finished starting jobs, job ids: {dict(zip(parallel_points,parallel_job_ids))}") # TODO: Use expt_state['points'] instead of step_points
 
-            for i in range(n_cycles): # TODO: Figure out how to handle n_cycles better.
-                self.check_jobs_status(parallel_job_ids)
+            #for i in range(n_cycles): # TODO: Figure out how to handle n_cycles better.
+            ready_points = self.check_jobs_status(parallel_job_ids)
         
             self.transfer_results(parallel_points)
             job_ids += parallel_job_ids
 
-        return self.process_results(step_points)                   # Process results from prior cycles in expt_state
+        print(f"ready_points = {ready_points}")
+        completed_x = np.array([[point_xs(p, self.expt_cfg['param_names'], self.expt_state)] for p in ready_points])
+        completed_y = np.array(self.process_results(ready_points)) # Process results from prior cycles in expt_state
 
+        print(f"completed_x = {completed_x} ")
+        print(f"completed_y = {completed_y} ")
+        not_nan = ~np.isnan(completed_y)
+        print(f"not_nan = {not_nan} ")
+
+        if(len(not_nan) == 0):
+            return [[]], [[]]
+        else: 
+            new_x = completed_x[not_nan]
+            new_y = completed_y[not_nan]
+            print(f"Returning {new_x}, {new_y}")
+            return new_x, new_y
+        
 
     def process_results(self, ready_points):
         # Extract completed and back-transferred results from expt_state
@@ -150,29 +196,41 @@ class MLD1ObjFun(ObjFunction):
         experiment_name = self.expt_cfg ['experiment_name']
 
         points = self.expt_state['points']
-        n_evals_per_step = self.opt_cfg['n_evals_per_step']
         n_objs           = self.expt_cfg['n_objectives']
-        if(len(ready_points) < n_evals_per_step): return None
-
-        y = np.zeros((n_evals_per_step,n_objs))
-        for i in range(n_evals_per_step): 
+        n_ready_points   = len(ready_points)
+        y = np.zeros((n_ready_points,n_objs))
+        
+        for i in range(n_ready_points): 
             point_id = ready_points[i]
 
             optimized_filepath = f"{local_outputdir}/{experiment_name}/point={point_id}/"
-            optimized_filename = f"{self.expt_cfg['identifier']}.averages"
+            optimized_filename = f"{self.expt_cfg['experiment_name']}.averages"
             #optimized_filename = f"/{setup}.{str(n_cycles-1).zfill(4)}.averages"
 
             target_type = self.expt_cfg['target_type']
-            if target_type == "ifremer":
-                correct_coords(f"{optimized_filepath}/{optimized_filename}", self.expt_cfg['map_resolution'])
-                optimized_dataset = xr.open_dataset(f"{optimized_filepath}/{optimized_filename}_corr_coords.nc")
-            elif target_type == "simulated_target": 
-                optimized_dataset = xr.open_dataset(f"{optimized_filepath}/{optimized_filename}.nc")
-            else:
-                raise ValueError("Target type should be either 'ifremer' or 'simulated_target'.")
+            try: 
+                if target_type == "ifremer":
+                    correct_coords(f"{optimized_filepath}/{optimized_filename}", self.expt_cfg['map_resolution'])
+                    optimized_dataset = xr.open_dataset(f"{optimized_filepath}/{optimized_filename}_corr_coords.nc")                
+                elif target_type == "simulated_target": 
+                    optimized_dataset = xr.open_dataset(f"{optimized_filepath}/{optimized_filename}.nc")
+                else:
+                    raise ValueError("Target type should be either 'ifremer' or 'simulated_target'.")
+            except FileNotFoundError as e:
+                print(f"VerOS point {point_id}: File {optimized_filename}.nc not found: {e}.")
+                y[i] = np.nan
 
-            # TODO: Veropt change: we should be minimizing instead of maximizing, since that's the canonical thing to do.
-            y[i] = calc_y(optimized_dataset, self.target_dataset, lat_range=self.expt_cfg['lat_range'])
+                continue
+
+            # Check if calculation completed or faile
+            simulation_time = optimized_dataset.Time
+            
+            if((len(simulation_time) == 0) or (abs(float(simulation_time[-1])/1e9 - self.expt_cfg['simulation_time']) > 86400)):
+                print(f"VerOS point {point_id} failed before completion: {simulation_time}")
+                y[i] = np.nan
+            else:
+                y[i] = calc_y(optimized_dataset, self.target_dataset, lat_range=self.expt_cfg['lat_range'])
+                self.expt_state['points'][point_id]['value'] = y[i]
 
             points[point_id]['state'] = 'result_processed' #TODO: completed?
 #            with open(self.param_list_filename, "a") as file:
@@ -198,9 +256,10 @@ class MLD1ObjFun(ObjFunction):
             setup_dir = f"{local_outputdir}/{experiment_name}/point={next_point}"
             os.makedirs(setup_dir, exist_ok=True)
 
-            # Write out parameters as JSON to setup_args.txt
+            # Write out parameters and expt setup as JSON to setup_args.txt
             kv = setup_name.split("=")[1:] # TODO: '_' splits kv-pairs, '=' splits k and v
-            setup_args_dict = {kv[i]: float(kv[i + 1]) for i in range(0, len(kv), 2)}
+            params_dict = {kv[i]: float(kv[i + 1]) for i in range(0, len(kv), 2)}
+            setup_args_dict = params_dict | self.expt_cfg
             write_json(f"{setup_dir}/setup_args.txt", setup_args_dict)
 
             shutil.copy(self.source_file_path, f"{setup_dir}/experiment.py")
@@ -211,7 +270,7 @@ class MLD1ObjFun(ObjFunction):
 
             # Assign parameters to the point number in the experiment state.
             # This allows easy reproduction of results, rerunning failed point runs, plotting, etc.
-            self.expt_state['points'][next_point] = {'params':setup_args_dict, 'state':'setup_created'}
+            self.expt_state['points'][next_point] = {'params':params_dict, 'state':'setup_created'}
             self.expt_state['next_point'] += 1        
             step_points += [next_point]
                 
@@ -377,7 +436,10 @@ class MLD1ObjFun(ObjFunction):
         for i in range(len(job_ids)):
             pending_jobs |= (1 << i)
 
+        
+
         while pending_jobs:
+            ready_points = []
             for i in range(len(job_ids)):
                 point_id, job_id = submitted_points[i], job_ids[i]
 
@@ -398,10 +460,11 @@ class MLD1ObjFun(ObjFunction):
 
                     print("Job {jd[JobId]}/{jd[JobName]} status: {jd[JobState]} (Reason: {jd[Reason]}).".format(jd=job_dict))
 
-                if job_dict['JobState'] == "COMPLETED" or "slurm_load_jobs error: Invalid job id specified" in stderr:
+                if job_dict['JobState'] == "COMPLETED" or job_dict['JobState'] == "COMPLETING" or "slurm_load_jobs error: Invalid job id specified" in stderr:
                     print(f"{job_id} status: COMPLETED")
                     pending_jobs &= ~(1 << i)
                     self.expt_state['points'][point_id]['state'] = 'job_completed'
+                    ready_points += [point_id]
 
                 if job_dict['JobState'] == "RUNNING":
                     pipe = subprocess.Popen(["ssh", hostname, f"tail -n 3 {log_file}"],
@@ -426,9 +489,10 @@ class MLD1ObjFun(ObjFunction):
 
                 write_json(self.state_filename,self.expt_state)
 
-                remote_poll_delay = 160; # should be in server/experiment config
-                for i in tqdm.tqdm(range(remote_poll_delay), "Time until next server poll"):
+                for i in tqdm.tqdm(range(self.remote_poll_delay), "Time until next server poll"):
                     time.sleep(1)
+
+        return list(set(ready_points))
     
 
     # Just builds the batch script string, no unexpected side effects like writing to files.
