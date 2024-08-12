@@ -31,7 +31,7 @@
         "account": "project_465000815",
         "partition": "small-g",
         "constraints": "",      // All LUMI small-g compute nodes are identical
-        "max_time": "00:30:00", 
+        "max_time": "02:00:00", 
         //"max_time":"71:59:59",  // small-g partition has max 72h time limit
         "n_cores":1, "n_cores_nx":1, "n_cores_ny":1, // We run fully on GPU with only one CPU core 
 
@@ -43,6 +43,6 @@
         "n_cycles": 1,
 
         // VerOpt settings
-        "max_parallel_evals": 8
+        "max_parallel_evals": 32
     }
 }
