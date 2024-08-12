@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name={experiment_name}
+#SBATCH --job-name={experiment_name}_P{point_id}
 #SBATCH -p {partition}
 #SBATCH -A {account}
 #SBATCH --time={max_time}
