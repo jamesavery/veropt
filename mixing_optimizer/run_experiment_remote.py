@@ -15,7 +15,7 @@ except:
 local_cfg = {
  'datadir':  "/data/ocean/",
  'outputdir':"/data/ocean/veropt_results/",
- 'source_dir': "/home/avery/work/ocean/veropt/" 
+ 'source_dir': "/opt/code/ocean/veropt/" 
 }
 
 ## TODO: Possibly move to ObjectFunction constructor
