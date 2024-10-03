@@ -8,11 +8,15 @@
 #SBATCH --gpus-per-task=1      # VerOS supports only 1 GPU per MPI task
 #SBATCH --cpus-per-task=1
 
-module load LUMI/23.09 partition/G
+module load LUMI/24.03 partition/G
+module load PrgEnv-cray
+module load cray-python
 module load craype-accel-amd-gfx90a
-module load rocm
+module load craype-network-ofi
+module load cray-mpich
+module load rocm/6.0.3
 
-export VEROS_SIF_IMAGE=/projappl/{account}/ocean/leap_15.4_rocm-5.3_veros.sif
+export VEROS_SIF_IMAGE=/projappl/project_465000815/ocean/leap_15.5_rocm-6.1.1_veros_serial.sif
 export MPICH_GPU_SUPPORT_ENABLED=1
 export MPI4JAX_USE_HIP_MPI=1
 export CPU_BIND="map_cpu:x48,56,16,24,1,8,32,40"
