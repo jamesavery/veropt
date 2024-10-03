@@ -40,23 +40,26 @@ def correct_coords(optimized_filename, res):
     if os.path.exists(f"{optimized_filename}_corr_coords.nc"):
         print(f"correct_coords called on already coord-corrected: {optimized_filename}.nc")
         return
-    
+
     ds = xr.open_dataset(f"{optimized_filename}.nc")
     if   res == "4deg":
-        new_xu_coords = np.concatenate([np.arange(90., 360., 4.), np.arange(2., 90., 4.)])
-        new_xt_coords = np.concatenate([np.arange(88., 360., 4.), np.arange(0., 88., 4.)])
+        new_xu_coords = np.concatenate([np.arange(88., 362., 4.), np.arange(4., 88., 4.)])
+        print(new_xu_coords)
+        new_xt_coords = np.concatenate([np.arange(90., 364., 4.), np.arange(6., 90., 4.)])
+        print(new_xt_coords)
     elif res == "1deg":
         new_xu_coords = np.concatenate([np.arange(90., 360., 1.), np.arange(0., 90., 1.)])
         new_xt_coords = np.concatenate([np.arange(90.5, 360.5, 1.), np.arange(0.5, 90.5, 1.)])
     else:
         raise ValueError("Resolution should either be '4deg' or '1deg'.")
-    
+
     ds.coords['xt'] = new_xt_coords
     ds = ds.sortby(ds.xt)
     ds.coords['xu'] = new_xu_coords
     ds = ds.sortby(ds.xu)
     ds.to_netcdf(f'{optimized_filename}_corr_coords.nc')
-    os.remove(f"{optimized_filename}.nc")
+    os.remove(f"{optimized_filename}.nc")    
+    ds.close()
 
 
 def calc_y(optimized_dataset, target_dataset, lat_range):  
