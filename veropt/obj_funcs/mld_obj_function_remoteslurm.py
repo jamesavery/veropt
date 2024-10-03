@@ -62,7 +62,32 @@ def correct_coords(optimized_filename, res):
     ds.close()
 
 
-def calc_y(optimized_dataset, target_dataset, lat_range):  
+def boundary_avoidance(params, param_list, bounds_lower, bounds_upper):
+    e = np.exp(1)
+    decay_rate = 50
+    boundary_err = np.zeros(len(param_list))
+    for i, p in enumerate(param_list):
+        if params[p] < bounds_lower[i] or params[p] > bounds_upper[i]:
+            boundary_err[i] = 1
+        else:
+            center = (bounds_lower[i] + bounds_upper[i]) / 2
+            if params[p] < center:
+                boundary_err[i] = np.exp(-decay_rate * (params[p] - bounds_lower[i]) / (bounds_upper[i] - bounds_lower[i]))
+            else:
+                boundary_err[i] = np.exp(-decay_rate * (bounds_upper[i] - params[p]) / (bounds_upper[i] - bounds_lower[i]))
+
+    return np.sum(boundary_err)/len(param_list)
+
+def psi_sanity(optimized_dataset):
+    psi_realworld = 140e6 # 140 Sverdrup
+    e = np.exp(1)
+    
+    psisample     = np.array(optimized_dataset.psi.isel(Time=-1).sel(xu=slice(296,304),yu=slice(-70,-62)))
+    psi_relerr    = (psisample-psi_realworld)/psi_realworld
+    psi_gausserr  = (1-np.exp(-psi_relerr**2))/(1-1/e) # from 0 (psi=140 Sv) to 1 (psi=0, psi=280 Sv)
+    return np.sum(psi_gausserr)/psi_gausserr.size, psisample
+
+def MLD_RMSE(optimized_dataset, target_dataset, lat_range):  
     lat_min, lat_max = lat_range  
     mld = optimized_dataset.mld.isel(Time=-1).sel(yt=slice(lat_min, lat_max)).values
     mld = np.where(mld == 0., -1., mld)
@@ -72,7 +97,7 @@ def calc_y(optimized_dataset, target_dataset, lat_range):
     
     MSE = np.nanmean(np.square((mld-target_mld)/target_mld))
 
-    return -np.sqrt(MSE)
+    return np.sqrt(MSE)
 
 
 class MLD1ObjFun(ObjFunction):
@@ -124,6 +149,23 @@ class MLD1ObjFun(ObjFunction):
             self.remote_poll_delay = int(  12*self.expt_cfg["simulation_time"]/year_in_seconds)  # should be in server/experiment config            
 
         super().__init__(self.mldObjFunc, bounds, len(param_names), n_objs, init_vals, stds)
+
+    def calc_y(self, point_id, optimized_dataset, target_dataset, lat_range):  
+
+        params       = self.expt_state['points'][point_id]['params']
+        param_names  = self.expt_cfg['param_names']
+        bounds_lower = self.expt_cfg['bounds_lower']
+        bounds_upper = self.expt_cfg['bounds_upper']
+
+        mld_error = MLD_RMSE(optimized_dataset, target_dataset, lat_range)
+        psi_error, psisample = psi_sanity(optimized_dataset)
+        boundary_error = boundary_avoidance(params, param_names, bounds_lower, bounds_upper)
+                                            
+        print(f"Point {point_id}: mld_error = {mld_error}, psi_error = {psi_error}, boundary_error = {boundary_error}")
+        print(f"psi_sample = {psisample}")
+
+        return -(1.0*mld_error + 1.0*psi_error + 1.0*boundary_error) # How should the two errors be weighted?
+
 
     def mldObjFunc(self, new_x):
 
@@ -232,7 +274,7 @@ class MLD1ObjFun(ObjFunction):
                 print(f"VerOS point {point_id} failed before completion: {simulation_time}")
                 y[i] = np.nan
             else:
-                y[i] = calc_y(optimized_dataset, self.target_dataset, lat_range=self.expt_cfg['lat_range'])
+                y[i] = self.calc_y(point_id, optimized_dataset, self.target_dataset, lat_range=self.expt_cfg['lat_range'])
                 self.expt_state['points'][point_id]['value'] = y[i]
 
             points[point_id]['state'] = 'result_processed' #TODO: completed?

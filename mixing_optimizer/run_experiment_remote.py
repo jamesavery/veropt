@@ -9,8 +9,19 @@ import sys, pyjson5 as json, datetime as dt
 try: 
     experiment_name, remote_server_name = sys.argv[1:3]
 except:
-    print(f"Syntax: python3 run_mld_remote.py <experiment_name> <remote_server_name>")
+    print(f"Syntax: python3 run_mld_remote.py <experiment_name> <remote_server_name> [resume_from_step] [resume_extra_steps]")
     sys.exit(1)
+
+if(len(sys.argv)>3):
+    resume_from_step   = int(sys.argv[3])
+else:
+    resume_from_step   = None
+    
+if(len(sys.argv)>4):
+    resume_extra_steps = int(sys.argv[4])
+else:
+    resume_extra_steps = 0
+
 
 local_cfg = {
  'datadir':  "/data/ocean/",
@@ -84,15 +95,20 @@ if "random_seed" in opt_cfg:
 else:
     random_seed = None
 
-optimiser = BayesOptimiser(n_init_rounds*n_evals_per_step, n_bayes_rounds*n_evals_per_step, obj_func, n_evals_per_step=n_evals_per_step, random_seed=random_seed)
-if 'raw_lengthscale' in opt_cfg: optimiser.model.constraint_dict_list[0]["covar_module"]["raw_lengthscale"] = opt_cfg['raw_lengthscale']
-if 'beta'            in opt_cfg: optimiser.set_acq_func_params("beta", opt_cfg['beta'])
-
+if resume_from_step is None:
+    optimiser = BayesOptimiser(n_init_rounds*n_evals_per_step, n_bayes_rounds*n_evals_per_step, obj_func, n_evals_per_step=n_evals_per_step, random_seed=random_seed)
+    if 'raw_lengthscale' in opt_cfg: optimiser.model.constraint_dict_list[0]["covar_module"]["raw_lengthscale"] = opt_cfg['raw_lengthscale']
+    if 'beta'            in opt_cfg: optimiser.set_acq_func_params("beta", opt_cfg['beta'])
+    resume_from_step = 0
+    opt_steps        = n_init_rounds + n_bayes_rounds        
+else:
+    print(f"Loading optimizer from checkpoint no. {resume_from_step} for {resume_extra_steps} additional steps")
+    opt_steps = resume_from_step + resume_extra_steps
+    
 # optimiser.run_all_opt_steps()
 
 # RUN ALL OPTIMISATION STEPS WITH CHECKPOINTING
-opt_steps = n_init_rounds + n_bayes_rounds
-for i in range(opt_steps):
+for i in range(resume_from_step,opt_steps):
     if i == 0:
         pass
     else:
