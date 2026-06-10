@@ -553,6 +553,38 @@ class BayesianOptimiser(SavableClass):
 
         return unnormalise_objectives
 
+    def get_unnormaliser_function_variables(self) -> Callable[[torch.Tensor], torch.Tensor]:
+
+        def unnormalise_variables(
+                variable_values: torch.Tensor,
+        ) -> torch.Tensor:
+
+            if self.return_normalised_data:
+
+                assert self._normaliser_variables is not None, "Must have made normalisers to call this"
+
+                variable_values = self._normaliser_variables.inverse_transform(variable_values)
+
+            return variable_values
+
+        return unnormalise_variables
+
+    def get_normaliser_function_objectives(self) -> Callable[[torch.Tensor], torch.Tensor]:
+
+        def normalise_objectives(
+                objective_values: torch.Tensor,
+        ) -> torch.Tensor:
+
+            if self.return_normalised_data:
+
+                assert self._normaliser_objectives is not None, "Must have made normalisers to call this"
+
+                objective_values = self._normaliser_objectives.transform(objective_values)
+
+            return objective_values
+
+        return normalise_objectives
+
     def add_reference_point_real_units(
             self,
             reference_point: ReferencePointInputDict,
@@ -748,6 +780,13 @@ class BayesianOptimiser(SavableClass):
 
         if self.settings.normalise:
             assert self.normalisers_have_been_initialised
+
+        # Must happen before training so e.g. a proxy prior mean can map between unit systems
+        #   - The closures read the current normalisers at call time, so they survive refits
+        self.predictor.update_model_normalisation_functions(
+            unnormaliser_variables=self.get_unnormaliser_function_variables(),
+            normaliser_objectives=self.get_normaliser_function_objectives()
+        )
 
         self.predictor.update_with_new_data(
             variable_values=self.evaluated_variable_values.tensor,

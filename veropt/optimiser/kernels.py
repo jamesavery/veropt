@@ -3,7 +3,9 @@ from typing import TypedDict, Unpack, Mapping, Any, Optional, Self, Union, Liter
 
 import gpytorch
 import torch
-from veropt.optimiser.model import GPyTorchSingleModel, change_interval_constraints
+from veropt.optimiser.model import (
+    GPyTorchSingleModel, change_interval_constraints, filter_out_empty_parameter_groups
+)
 from veropt.optimiser.saver_loader_utility import SavableDataClass
 from veropt.optimiser.utility import _validate_typed_dict
 
@@ -138,7 +140,7 @@ class MaternKernel(GPyTorchSingleModel):
         change_interval_constraints(
             lower_bound=lower_bound,
             upper_bound=upper_bound,
-            module=self.model_with_data.covar_module,
+            module=self.data_model_base_covar_module,
             parameter_name='raw_lengthscale'
         )
 
@@ -146,7 +148,7 @@ class MaternKernel(GPyTorchSingleModel):
 
         assert self.model_with_data is not None, "Must have trained model before calling this"
 
-        return self.model_with_data.covar_module.lengthscale
+        return self.data_model_base_covar_module.lengthscale
 
     def get_settings(self) -> SavableDataClass:
         return self.settings
@@ -244,7 +246,7 @@ class DoubleMaternKernel(GPyTorchSingleModel):
             lower_bound=lower_bound,
             upper_bound=upper_bound,
             parameter_name='raw_lengthscale',
-            module=self.model_with_data.covar_module.kernels[kernel_number]
+            module=self.data_model_base_covar_module.kernels[kernel_number]
         )
 
     def get_lengthscale(self) -> torch.Tensor:
@@ -374,7 +376,7 @@ class RationalQuadraticKernel(GPyTorchSingleModel):
         change_interval_constraints(
             lower_bound=lower_bound,
             upper_bound=upper_bound,
-            module=self.model_with_data.covar_module,
+            module=self.data_model_base_covar_module,
             parameter_name='alpha'
         )
 
@@ -389,7 +391,7 @@ class RationalQuadraticKernel(GPyTorchSingleModel):
         change_interval_constraints(
             lower_bound=lower_bound,
             upper_bound=upper_bound,
-            module=self.model_with_data.covar_module,
+            module=self.data_model_base_covar_module,
             parameter_name='raw_lengthscale'
         )
 
@@ -397,13 +399,13 @@ class RationalQuadraticKernel(GPyTorchSingleModel):
 
         assert self.model_with_data is not None, "Must have trained model before calling this"
 
-        return self.model_with_data.covar_module.lengthscale
+        return self.data_model_base_covar_module.lengthscale
 
     def get_alpha(self) -> torch.Tensor:
 
         assert self.model_with_data is not None, "Must have trained model before calling this"
 
-        return self.model_with_data.covar_module.alpha
+        return self.data_model_base_covar_module.alpha
 
     def get_settings(self) -> SavableDataClass:
         return self.settings
@@ -499,7 +501,7 @@ class RationalQuadraticMaternKernel(GPyTorchSingleModel):
         change_interval_constraints(
             lower_bound=self.settings.rq_lengthscale_lower_bound,
             upper_bound=self.settings.rq_lengthscale_upper_bound,
-            module=self.model_with_data.covar_module.kernels[0].base_kernel,
+            module=self.data_model_base_covar_module.kernels[0].base_kernel,
             parameter_name='raw_lengthscale'
         )
 
@@ -507,7 +509,7 @@ class RationalQuadraticMaternKernel(GPyTorchSingleModel):
             change_interval_constraints(
                 lower_bound=self.settings.alpha_lower_bound,
                 upper_bound=self.settings.alpha_upper_bound,
-                module=self.model_with_data.covar_module.kernels[0].base_kernel,
+                module=self.data_model_base_covar_module.kernels[0].base_kernel,
                 parameter_name='raw_alpha'
             )
 
@@ -517,7 +519,7 @@ class RationalQuadraticMaternKernel(GPyTorchSingleModel):
         change_interval_constraints(
             lower_bound=self.settings.matern_lengthscale_lower_bound,
             upper_bound=self.settings.matern_lengthscale_upper_bound,
-            module=self.model_with_data.covar_module.kernels[1].base_kernel,
+            module=self.data_model_base_covar_module.kernels[1].base_kernel,
             parameter_name='raw_lengthscale'
         )
         self.set_noise(
@@ -533,15 +535,15 @@ class RationalQuadraticMaternKernel(GPyTorchSingleModel):
         assert self.model_with_data is not None, "Must have trained model before calling this"
 
         return {
-            'rational_quadratic': self.model_with_data.covar_module.kernels[0].base_kernel.lengthscale,
-            'matern': self.model_with_data.covar_module.kernels[1].base_kernel.lengthscale
+            'rational_quadratic': self.data_model_base_covar_module.kernels[0].base_kernel.lengthscale,
+            'matern': self.data_model_base_covar_module.kernels[1].base_kernel.lengthscale
         }
 
     def get_alpha(self) -> torch.Tensor:
 
         assert self.model_with_data is not None, "Must have trained model before calling this"
 
-        return self.model_with_data.covar_module.kernels[0].base_kernel.alpha
+        return self.data_model_base_covar_module.kernels[0].base_kernel.alpha
 
     def get_settings(self) -> SavableDataClass:
         return self.settings
@@ -550,26 +552,22 @@ class RationalQuadraticMaternKernel(GPyTorchSingleModel):
 
         # Note: Overwriting this method to exclude the outputscales in the ScaleKernel's
 
-        parameter_group_list = []
-
         assert self.model_with_data is not None, "Model must be initialised to use this function."
 
         if self.train_noise is True:
             raise NotImplementedError("Not implemented for this kernel")
 
-        parameter_group_list.append(
-            {'params': self.model_with_data.mean_module.parameters()}
-        )
+        candidate_parameter_groups = [
+            list(self.model_with_data.mean_module.parameters()),
+            list(self.data_model_base_covar_module.kernels[0].base_kernel.parameters()),
+            list(self.data_model_base_covar_module.kernels[1].base_kernel.parameters()),
+            # The proxy prior's amplitude factor, if there is one
+            list(self.model_with_data.covar_module.parameters(recurse=False))
+        ]
 
-        parameter_group_list.append(
-            {'params': self.model_with_data.covar_module.kernels[0].base_kernel.parameters()}
+        self.trained_parameters = filter_out_empty_parameter_groups(
+            candidate_parameter_groups=candidate_parameter_groups
         )
-
-        parameter_group_list.append(
-            {'params': self.model_with_data.covar_module.kernels[1].base_kernel.parameters()}
-        )
-
-        self.trained_parameters = parameter_group_list
 
 
 class SMKParametersInputDict(TypedDict, total=False):
@@ -653,14 +651,14 @@ class SpectralMixtureKernel(GPyTorchSingleModel):
             train_targets: torch.Tensor,
     ) -> None:
 
-        assert self.model_with_data is not None, "Model must be initialised to call this method"
-
         super().initialise_model_with_data(
             train_inputs=train_inputs,
             train_targets=train_targets,
         )
 
-        self.model_with_data.covar_module.initialize_from_data(
+        assert self.model_with_data is not None, "Model must be initialised to call this method"
+
+        self.data_model_base_covar_module.initialize_from_data(
             train_x=train_inputs,
             train_y=train_targets,
         )
@@ -752,14 +750,14 @@ class SpectralDeltaKernel(GPyTorchSingleModel):
             train_targets: torch.Tensor,
     ) -> None:
 
-        assert self.model_with_data is not None, "Model must be initialised to call this method"
-
         super().initialise_model_with_data(
             train_inputs=train_inputs,
             train_targets=train_targets,
         )
 
-        self.model_with_data.covar_module.initialize_from_data(
+        assert self.model_with_data is not None, "Model must be initialised to call this method"
+
+        self.data_model_base_covar_module.initialize_from_data(
             train_x=train_inputs,
             train_y=train_targets,
         )

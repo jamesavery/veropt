@@ -12,6 +12,10 @@ import torch
 from gpytorch.constraints import GreaterThan, Interval, LessThan
 from gpytorch.distributions import MultivariateNormal
 
+from veropt.optimiser.proxy_prior import (
+    NormalisationFunction, ProxyMean, ProxyPrior, ProxyScaledKernel,
+    make_single_column_objective_normaliser
+)
 from veropt.optimiser.saver_loader_utility import SavableClass, SavableDataClass, rehydrate_object
 from veropt.optimiser.utility import (
     _validate_typed_dict, check_variable_and_objective_shapes,
@@ -120,9 +124,11 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
 
         self.model_with_data: Optional[GPyTorchDataModel] = None
 
-        self.trained_parameters: list[dict[str, Iterator[torch.nn.Parameter]]] = [{}]
+        self.trained_parameters: list[dict[str, list[torch.nn.Parameter]]] = [{}]
 
         self.train_noise = train_noise
+
+        self.proxy_prior: Optional[ProxyPrior] = None
 
         assert 'name' in self.__class__.__dict__, (
             f"Must give subclass '{self.__class__.__name__}' the static class variable 'name'."
@@ -161,6 +167,15 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
             settings=saved_state['settings']
         )
 
+        # Must happen before loading the state dict so the parameter names match
+        #   - ('.get' for compatibility with saves from before proxy priors existed)
+        if saved_state.get('proxy_prior') is not None:
+            model.set_proxy_prior(
+                proxy_prior=ProxyPrior.from_saved_state(
+                    saved_state=saved_state['proxy_prior']['state']
+                )
+            )
+
         if len(saved_state['state_dict']) > 0:
             model.initialise_model_from_state_dict(
                 train_inputs=torch.tensor(saved_state['train_inputs']),
@@ -176,27 +191,75 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
 
     def _set_up_trained_parameters(self) -> None:
 
-        parameter_group_list = []
-
         assert self.model_with_data is not None, "Model must be initialised to use this function."
 
         if self.train_noise:
 
-            parameter_group_list.append(
-                {'params': self.model_with_data.parameters()}
-            )
+            candidate_parameter_groups = [
+                list(self.model_with_data.parameters())
+            ]
 
         else:
 
-            parameter_group_list.append(
-                {'params': self.model_with_data.mean_module.parameters()}
-            )
+            candidate_parameter_groups = [
+                list(self.model_with_data.mean_module.parameters()),
+                list(self.model_with_data.covar_module.parameters())
+            ]
 
-            parameter_group_list.append(
-                {'params': self.model_with_data.covar_module.parameters()}
-            )
+        self.trained_parameters = filter_out_empty_parameter_groups(
+            candidate_parameter_groups=candidate_parameter_groups
+        )
 
-        self.trained_parameters = parameter_group_list
+    def set_proxy_prior(
+            self,
+            proxy_prior: ProxyPrior
+    ) -> None:
+
+        assert self.model_with_data is None, "The proxy prior must be set before the model is given data."
+        assert self.proxy_prior is None, "A proxy prior has already been set on this model."
+
+        self.proxy_prior = proxy_prior
+
+        proxy_mean = ProxyMean(
+            mean_function=proxy_prior.mean_function
+        )
+
+        self.mean_module = proxy_mean
+
+        self.kernel = ProxyScaledKernel(
+            base_kernel=self.kernel,
+            proxy_mean=proxy_mean,
+            settings=proxy_prior.settings
+        )
+
+    @property
+    def data_model_base_covar_module(self) -> gpytorch.Module:
+
+        # The covariance module without the proxy prior's scaling wrapper (if there is one),
+        # so that kernel-specific constraints and getters reach the right module
+
+        assert self.model_with_data is not None, "Model must be initialised to use this property."
+
+        covar_module = self.model_with_data.covar_module
+
+        if isinstance(covar_module, ProxyScaledKernel):
+            return covar_module.base_kernel
+
+        else:
+            return covar_module
+
+    def update_normalisation_functions(
+            self,
+            unnormaliser_variables: NormalisationFunction,
+            normaliser_objectives: NormalisationFunction
+    ) -> None:
+
+        if isinstance(self.mean_module, ProxyMean):
+
+            self.mean_module.update_normalisation_functions(
+                unnormaliser_variables=unnormaliser_variables,
+                normaliser_objectives=normaliser_objectives
+            )
 
     @abc.abstractmethod
     def _set_up_model_constraints(self) -> None:
@@ -255,7 +318,8 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
                 'train_inputs': train_inputs,
                 'train_targets': train_targets,
                 'n_variables': self.n_variables,
-                'settings': self.get_settings().gather_dicts_to_save()
+                'settings': self.get_settings().gather_dicts_to_save(),
+                'proxy_prior': self.proxy_prior.gather_dicts_to_save() if self.proxy_prior is not None else None
             }
         }
 
@@ -287,6 +351,23 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
             noise = float(self.likelihood.noise_covar.raw_noise_constraint.lower_bound)
 
         self.model_with_data.likelihood.noise = torch.tensor(noise)
+
+
+def filter_out_empty_parameter_groups(
+        candidate_parameter_groups: list[list[torch.nn.Parameter]]
+) -> list[dict[str, list[torch.nn.Parameter]]]:
+
+    # torch optimisers raise on empty parameter groups
+    #   - and e.g. a proxy prior mean has no trainable parameters
+
+    parameter_group_list = [
+        {'params': parameter_group} for parameter_group in candidate_parameter_groups
+        if len(parameter_group) > 0
+    ]
+
+    assert len(parameter_group_list) > 0, "Found no trainable parameters in the model."
+
+    return parameter_group_list
 
 
 def change_interval_constraints(
@@ -383,7 +464,7 @@ class TorchModelOptimiser(SavableClass, metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def initialise_optimiser(
             self,
-            parameters: Iterator[torch.nn.Parameter] | list[dict[str, Iterator[torch.nn.Parameter]]]
+            parameters: Iterator[torch.nn.Parameter] | list[dict[str, list[torch.nn.Parameter]]]
     ) -> None:
         ...
 
@@ -417,7 +498,7 @@ class AdamModelOptimiser(TorchModelOptimiser):
 
     def initialise_optimiser(
             self,
-            parameters: Iterator[torch.nn.Parameter] | list[dict[str, Iterator[torch.nn.Parameter]]]
+            parameters: Iterator[torch.nn.Parameter] | list[dict[str, list[torch.nn.Parameter]]]
     ) -> None:
 
         self.optimiser = torch.optim.Adam(
@@ -745,6 +826,23 @@ class GPyTorchFullModel(SurrogateModel, SavableClass):
 
         return self._model
 
+    def update_normalisation_functions(
+            self,
+            unnormaliser_variables: NormalisationFunction,
+            normaliser_objectives: NormalisationFunction
+    ) -> None:
+
+        for objective_no, model in enumerate(self._model_list):
+
+            model.update_normalisation_functions(
+                unnormaliser_variables=unnormaliser_variables,
+                normaliser_objectives=make_single_column_objective_normaliser(
+                    normaliser_objectives=normaliser_objectives,
+                    objective_index=objective_no,
+                    n_objectives=self.n_objectives
+                )
+            )
+
     @property
     def model_has_been_trained(self) -> bool:
         if self._model is None:
@@ -811,7 +909,7 @@ class GPyTorchFullModel(SurrogateModel, SavableClass):
 
     def _initialise_optimiser(self) -> None:
 
-        parameters: list[dict[str, Iterator[torch.nn.Parameter]]] = []
+        parameters: list[dict[str, list[torch.nn.Parameter]]] = []
         for model in self._model_list:
             parameters += model.trained_parameters
 

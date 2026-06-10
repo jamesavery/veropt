@@ -148,6 +148,16 @@ class Predictor(SavableClass, metaclass=abc.ABCMeta):
         self._normaliser_variables = normaliser_variables
         self._unnormaliser_objectives = unnormaliser_objectives
 
+    def update_model_normalisation_functions(
+            self,
+            unnormaliser_variables: Callable[[torch.Tensor], torch.Tensor],
+            normaliser_objectives: Callable[[torch.Tensor], torch.Tensor]
+    ) -> None:
+
+        # Gives components inside the model (e.g. a proxy prior mean) access to the current
+        # normalisations. Does nothing unless a predictor subclass implements it.
+        pass
+
 
 # TODO: Make sure we refresh acq func before suggesting points
 #   - Might want to do some checks to make sure the model is updated on all evaluated points
@@ -327,8 +337,15 @@ class BotorchPredictor(Predictor):
             new_bounds=new_bounds
         )
 
-        self.acquisition_optimiser.update_bounds(
-            new_bounds=new_bounds
+    def update_model_normalisation_functions(
+            self,
+            unnormaliser_variables: Callable[[torch.Tensor], torch.Tensor],
+            normaliser_objectives: Callable[[torch.Tensor], torch.Tensor]
+    ) -> None:
+
+        self.model.update_normalisation_functions(
+            unnormaliser_variables=unnormaliser_variables,
+            normaliser_objectives=normaliser_objectives
         )
 
     def gather_dicts_to_save(self) -> dict:

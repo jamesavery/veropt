@@ -23,6 +23,7 @@ references it. A dataclass variant, `SavableDataClass`, derives both methods aut
 |---|---|---|---|
 | Objective (Python function) | `CallableObjective` — implement `_run(parameter_values) -> tensor [n_points, n_objectives]` | `optimiser/objective.py` | — |
 | Objective (external process) | `InterfaceObjective` — implement `save_candidates()` / `load_evaluated_points()` | `optimiser/objective.py` | — |
+| Proxy prior mean (fast approximate objective) | `ProxyMeanFunction` — implement `_run(variable_values) -> tensor [n_points]`, real units | `optimiser/proxy_prior.py` | pass via `model={'proxy_prior': ..., 'proxy_prior_settings': {...}}` |
 | Kernel / single-objective GP | `GPyTorchSingleModel` | `optimiser/kernels.py` | add the option string to `SingleKernelOptions` and the constructor dispatch in `optimiser/constructors.py` |
 | Acquisition function | `BotorchAcquisitionFunction` — implement `refresh()` to (re)build the botorch object | `optimiser/acquisition.py` | `AcquisitionOptions` literal + dispatch in `constructors.py`; expand `AcquisitionSettings` |
 | Acquisition optimiser | `AcquisitionOptimiser` — implement `optimise()`; mind `maximum_evaluations_per_step` | `optimiser/acquisition_optimiser.py` | `AcquisitionOptimiserOptions` literal + dispatch |

@@ -17,6 +17,7 @@ from veropt.optimiser.objective import CallableObjective, InterfaceObjective
 from veropt.optimiser.optimiser import BayesianOptimiser
 from veropt.optimiser.optimiser_utility import OptimiserSettingsInputDict
 from veropt.optimiser.prediction import BotorchPredictor
+from veropt.optimiser.proxy_prior import ProxyMeanFunction, ProxyPrior, ProxyPriorSettingsInputDict
 from veropt.optimiser.saver_loader_utility import get_all_subclasses
 from veropt.optimiser.utility import _load_defaults, _validate_typed_dict
 
@@ -44,6 +45,8 @@ class GPytorchModelChoice(TypedDict, total=False):
     kernel_optimiser: Optional[KernelOptimiserOptions]
     kernel_optimiser_settings: Optional[ModelOptimiserSettings]
     training_settings: Optional[GPyTorchTrainingParametersInputDict]
+    proxy_prior: Union[ProxyMeanFunction, list[Optional[ProxyMeanFunction]], None]
+    proxy_prior_settings: Union[ProxyPriorSettingsInputDict, list[Optional[ProxyPriorSettingsInputDict]], None]
 
 
 class AcquisitionChoice(TypedDict, total=False):
@@ -176,6 +179,10 @@ def gpytorch_model(
         kernel_optimiser: Optional[KernelOptimiserOptions] = None,
         kernel_optimiser_settings: Optional[ModelOptimiserSettings] = None,
         training_settings: Optional[GPyTorchTrainingParametersInputDict] = None,
+        proxy_prior: Union[ProxyMeanFunction, list[Optional[ProxyMeanFunction]], None] = None,
+        proxy_prior_settings: Union[
+            ProxyPriorSettingsInputDict, list[Optional[ProxyPriorSettingsInputDict]], None
+        ] = None,
 ) -> GPyTorchFullModel:
 
     single_model_list = gpytorch_single_model_list(
@@ -183,6 +190,14 @@ def gpytorch_model(
         n_objectives=n_objectives,
         kernels=kernels,
         kernel_settings=kernel_settings
+    )
+
+    _apply_proxy_priors(
+        single_model_list=single_model_list,
+        n_variables=n_variables,
+        n_objectives=n_objectives,
+        proxy_prior=proxy_prior,
+        proxy_prior_settings=proxy_prior_settings
     )
 
     model_optimiser = torch_model_optimiser(
@@ -281,6 +296,74 @@ def gpytorch_single_model_list(
         raise ValueError(wrong_kernel_input_message)
 
     return single_model_list
+
+
+def _apply_proxy_priors(
+        single_model_list: list[GPyTorchSingleModel],
+        n_variables: int,
+        n_objectives: int,
+        proxy_prior: Union[ProxyMeanFunction, list[Optional[ProxyMeanFunction]], None] = None,
+        proxy_prior_settings: Union[
+            ProxyPriorSettingsInputDict, list[Optional[ProxyPriorSettingsInputDict]], None
+        ] = None,
+) -> None:
+
+    if proxy_prior is None:
+
+        assert proxy_prior_settings is None, "Cannot accept proxy prior settings without a proxy prior."
+
+        return
+
+    if isinstance(proxy_prior, ProxyMeanFunction):
+        mean_function_list: list[Optional[ProxyMeanFunction]] = [proxy_prior] * n_objectives
+
+    elif isinstance(proxy_prior, list):
+
+        assert len(proxy_prior) == n_objectives, (
+            f"Please specify a proxy prior (or None) for each objective. "
+            f"Received {n_objectives} objectives but {len(proxy_prior)} proxy priors."
+        )
+
+        mean_function_list = proxy_prior
+
+    else:
+        raise ValueError(
+            "'proxy_prior' must be either None, a ProxyMeanFunction or a list of ProxyMeanFunction's and None's."
+        )
+
+    if isinstance(proxy_prior_settings, list):
+
+        assert len(proxy_prior_settings) == n_objectives, (
+            f"Please specify proxy prior settings (or None) for each objective. "
+            f"Received {n_objectives} objectives but {len(proxy_prior_settings)} settings."
+        )
+
+        settings_list = proxy_prior_settings
+
+    else:
+        settings_list = [proxy_prior_settings] * n_objectives
+
+    for objective_no, mean_function in enumerate(mean_function_list):
+
+        if mean_function is None:
+
+            assert settings_list[objective_no] is None, (
+                f"Received proxy prior settings but no proxy prior for objective number {objective_no}."
+            )
+
+            continue
+
+        assert mean_function.n_variables == n_variables, (
+            f"The proxy prior for objective number {objective_no} expects {mean_function.n_variables} variables "
+            f"but the objective has {n_variables}."
+        )
+
+        single_model_list[objective_no].set_proxy_prior(
+            proxy_prior=ProxyPrior.from_mean_function_and_settings(
+                mean_function=mean_function,
+                settings=settings_list[objective_no] or {}
+            )
+        )
 
 
 def gpytorch_single_model(

@@ -10,7 +10,7 @@ TypedDict** (string options + settings dicts, validated against `Literal` types)
 
 | Parameter | Choice dict | Options (defaults from `default_settings.json` first) |
 |---|---|---|
-| `model` | `GPytorchModelChoice` | kernels: `matern`, `double_matern`, `rational_quadratic`, `rational_quadratic_and_matern`, `SMK`, `spectral_delta`; one kernel name for all objectives or a list (one per objective); `kernel_optimiser`: `adam`; plus `training_settings` (e.g. `max_iter`, learning rate) |
+| `model` | `GPytorchModelChoice` | kernels: `matern`, `double_matern`, `rational_quadratic`, `rational_quadratic_and_matern`, `SMK`, `spectral_delta`; one kernel name for all objectives or a list (one per objective); `kernel_optimiser`: `adam`; plus `training_settings` (e.g. `max_iter`, learning rate); optionally `proxy_prior` + `proxy_prior_settings` (see "Proxy-informed priors" below) |
 | `acquisition_function` | `AcquisitionChoice` | `qlogehvi` (multi-objective default), `ucb` (single-objective default, setting `beta`) |
 | `acquisition_optimiser` | `AcquisitionOptimiserChoice` | `dual_annealing` (setting `max_iter`); `allow_proximity_punishment` (default on when `n_evaluations_per_step > 1`) with `proximity_punish_settings` (`alpha`, `omega`, `refresh_setting`) |
 | `normaliser` | `NormaliserChoice` | `zero_mean_unit_variance` |
@@ -115,6 +115,46 @@ Concrete kernels live in `kernels.py`; each is a `GPyTorchSingleModel` subclass 
 
   Without this (or with `allow_proximity_punishment=False`), a batch of q candidates from a
   deterministic optimiser would collapse onto the same maximum.
+
+## Proxy-informed priors (`proxy_prior.py`)
+
+When a fast approximation of the objective exists with a known pointwise deviation bound (e.g.
+"the true objective is within 1% of the proxy everywhere"), the GP prior can be built from it
+instead of the uninformative default. Subclass `ProxyMeanFunction` (real units in, real units out,
+unique `name`) and pass it through the model choice:
+
+```python
+optimiser = bayesian_optimiser(
+    ...,
+    model={
+        'kernels': 'matern',
+        'proxy_prior': my_proxy,                      # or a list, one entry (or None) per objective
+        'proxy_prior_settings': {'bound_value': 0.01}
+    },
+    n_points_before_fitting=n_evaluations_per_step,   # informative prior pays off from the first batch
+)
+```
+
+The encoding: prior mean `m(x) = proxy(x)` (a `ProxyMean` gpytorch mean that maps the model's
+normalised inputs to real units, evaluates the proxy, and maps back), and prior covariance
+`k(x,x') = c²·σ(x)σ(x')·k_base(x,x')` (`ProxyScaledKernel` wrapping any of the existing kernels,
+which are all correlation kernels). With the default relative bound,
+`σ(x) = bound_value·|proxy(x)| / bound_in_n_sigmas` — i.e. "1%" is read as a 2σ band by default.
+The scalar amplitude factor `c` is trained by the marginal likelihood but hard-capped at 1 via a
+gpytorch `Interval` constraint, so the band can tighten with data but never exceed the promised
+bound; set `train_amplitude_factor: False` to pin it.
+
+Settings (`ProxyPriorSettingsInputDict`): `bound_value` (required), `bound_type`
+(`relative`/`absolute`), `bound_in_n_sigmas` (2.0), `train_amplitude_factor` (True),
+`amplitude_factor_lower_bound` (0.1), `amplitude_floor` (0.0, real units — keeps σ away from zero
+where a relative-bound proxy crosses zero, which otherwise pins the GP and can upset Cholesky).
+
+Caveats: the bound is encoded softly (a 2σ Gaussian band, not a hard constraint); the proxy is
+called thousands of times per suggestion step inside dual annealing, so it should cost well under
+a second; the proxy is evaluated without gradients (fine for the current derivative-free
+acquisition optimisers). Saving/loading works like user-defined objectives: the
+`ProxyMeanFunction` subclass must be importable when the state file is loaded. See
+`examples/example_proxy_informed_prior.py`.
 
 ## Normalisation (`normalisation.py`)
 
