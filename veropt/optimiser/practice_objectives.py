@@ -52,7 +52,10 @@ class Hartmann(BotorchPracticeObjective):
 
         n_objectives = 1
 
-        function = botorch.test_functions.Hartmann(negate=True)
+        function = botorch.test_functions.Hartmann(
+            dim=n_variables,
+            negate=True
+        )
 
         super().__init__(
             bounds_lower=[0.0] * n_variables,
