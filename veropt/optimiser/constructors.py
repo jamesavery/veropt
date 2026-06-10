@@ -244,8 +244,8 @@ def gpytorch_single_model_list(
 
             assert kernel_settings is None, "Cannot accept kernel settings for an already created model list."
 
-            for kernel in kernels:
-                assert isinstance(kernel, GPyTorchSingleModel), wrong_kernel_input_message
+            for kernel_model in kernels:
+                assert isinstance(kernel_model, GPyTorchSingleModel), wrong_kernel_input_message
 
             single_model_list = kernels  # type: ignore[assignment]  # (type is checked above, mypy can't follow it)
 

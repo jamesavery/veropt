@@ -475,7 +475,7 @@ class ProximityPunishmentSequentialOptimiser(AcquisitionOptimiser):
             sample = acquisition_function(
                 variable_values=random_coordinates[coord_ind:coord_ind + 1, :]
             )
-            samples[coord_ind] = sample.detach().numpy()  # If this is not detached, it causes a memory leak o:)
+            samples[coord_ind] = sample.detach().item()  # If this is not detached, it causes a memory leak o:)
 
         return samples
 
@@ -539,7 +539,7 @@ class ProximityPunishmentSequentialOptimiser(AcquisitionOptimiser):
 
         top_cluster_ind = best_fitter.means_.argmax()
 
-        self.scaling = 2 * float(np.sqrt(best_fitter.covariances_[top_cluster_ind]))
+        self.scaling = 2 * float(np.sqrt(best_fitter.covariances_[top_cluster_ind].item()))
 
     def gather_dicts_to_save(self) -> dict:
         save_dict = super().gather_dicts_to_save()
