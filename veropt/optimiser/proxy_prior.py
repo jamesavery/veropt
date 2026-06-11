@@ -389,6 +389,22 @@ class ProxyScaledKernel(gpytorch.kernels.Kernel):  # type: ignore[misc]
             objective_values=sigma_real_units
         )
 
+    def _evaluate_base_kernel(
+            self,
+            x1: torch.Tensor,
+            x2: torch.Tensor,
+            diag: bool,
+            **params: Any
+    ) -> torch.Tensor:
+
+        values = self.base_kernel(x1, x2, diag=diag, **params)
+
+        if not isinstance(values, torch.Tensor):
+            # Materialising lazy kernel tensors; fine at the small data sizes veropt is built for
+            values = values.to_dense()
+
+        return values
+
     def forward(
             self,
             x1: torch.Tensor,
@@ -400,14 +416,16 @@ class ProxyScaledKernel(gpytorch.kernels.Kernel):  # type: ignore[misc]
         if params.pop('last_dim_is_batch', False):
             raise NotImplementedError(f"'last_dim_is_batch' is not supported by {self.__class__.__name__}.")
 
-        base_values = self.base_kernel(x1, x2, diag=diag, **params)
+        base_values = self._evaluate_base_kernel(x1, x2, diag=diag, **params)
 
-        if not isinstance(base_values, torch.Tensor):
-            # Materialising lazy kernel tensors; fine at the small data sizes veropt is built for
-            base_values = base_values.to_dense()
+        # Normalising the base kernel by its diagonal so it becomes a correlation kernel
+        #   - Some kernels (e.g. sums of kernels, spectral mixtures) don't have k(x, x) = 1,
+        #     which would silently inflate the prior band beyond the promised bound
+        base_diagonal_1 = self._evaluate_base_kernel(x1, x1, diag=True, **params).clamp(min=1e-12).sqrt()
+        base_diagonal_2 = self._evaluate_base_kernel(x2, x2, diag=True, **params).clamp(min=1e-12).sqrt()
 
-        amplitude_1 = self._amplitude(variable_values=x1) * self.amplitude_factor
-        amplitude_2 = self._amplitude(variable_values=x2) * self.amplitude_factor
+        amplitude_1 = self._amplitude(variable_values=x1) * self.amplitude_factor / base_diagonal_1
+        amplitude_2 = self._amplitude(variable_values=x2) * self.amplitude_factor / base_diagonal_2
 
         if diag:
             return amplitude_1 * amplitude_2 * base_values

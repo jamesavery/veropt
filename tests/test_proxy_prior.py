@@ -231,6 +231,43 @@ def test_proxy_scaled_kernel_diagonal_matches_amplitude() -> None:
     assert torch.allclose(diagonal, expected_diagonal)
 
 
+def test_proxy_scaled_kernel_normalises_non_correlation_base_kernels() -> None:
+
+    # A sum of two Matern kernels has k(x, x) = 2, which must not inflate the prior band
+
+    n_variables = 2
+    bound_value = 0.05
+    bound_in_n_sigmas = 2.0
+
+    proxy_mean = make_proxy_mean_with_identity_normalisation(
+        mean_function=QuadraticProxy(n_variables=n_variables)
+    )
+
+    base_kernel = gpytorch.kernels.MaternKernel(ard_num_dims=n_variables) + (
+        gpytorch.kernels.MaternKernel(ard_num_dims=n_variables)
+    )
+
+    kernel = ProxyScaledKernel(
+        base_kernel=base_kernel,
+        proxy_mean=proxy_mean,
+        settings=ProxyPriorSettings(
+            bound_value=bound_value,
+            bound_in_n_sigmas=bound_in_n_sigmas,
+            train_amplitude_factor=False
+        )
+    )
+
+    variable_values = torch.rand(10, n_variables)
+
+    proxy_values = QuadraticProxy(n_variables=n_variables)(variable_values)
+
+    expected_diagonal = (bound_value * proxy_values.abs() / bound_in_n_sigmas) ** 2
+
+    diagonal = kernel(variable_values, variable_values, diag=True)
+
+    assert torch.allclose(diagonal, expected_diagonal)
+
+
 def test_proxy_scaled_kernel_absolute_bound() -> None:
 
     n_variables = 2

@@ -137,8 +137,10 @@ optimiser = bayesian_optimiser(
 
 The encoding: prior mean `m(x) = proxy(x)` (a `ProxyMean` gpytorch mean that maps the model's
 normalised inputs to real units, evaluates the proxy, and maps back), and prior covariance
-`k(x,x') = c²·σ(x)σ(x')·k_base(x,x')` (`ProxyScaledKernel` wrapping any of the existing kernels,
-which are all correlation kernels). With the default relative bound,
+`k(x,x') = c²·σ(x)σ(x')·ρ(x,x')` (`ProxyScaledKernel` wrapping any of the existing kernels;
+the wrapped kernel is normalised by its own diagonal, so even base kernels with `k(x,x) ≠ 1` —
+kernel sums, spectral mixtures — become correlation kernels and the band stays calibrated).
+With the default relative bound,
 `σ(x) = bound_value·|proxy(x)| / bound_in_n_sigmas` — i.e. "1%" is read as a 2σ band by default.
 The scalar amplitude factor `c` is trained by the marginal likelihood but hard-capped at 1 via a
 gpytorch `Interval` constraint, so the band can tighten with data but never exceed the promised
