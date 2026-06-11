@@ -57,8 +57,8 @@ composes with arbitrary stationary correlation kernels, survives the data
 renormalisation used in practical BO implementations, and is available in the
 open-source package \veropt{}. On the six-dimensional Hartmann benchmark with
 a proxy distorted by at most 1\%, the proxy-informed prior comes within
-$0.3\%$ of the global optimum after a single Bayesian batch (12 evaluations)
-on every tested seed, whereas a flat prior is still $19\%$ short of the
+$0.2\%$ of the global optimum after a single Bayesian batch (12 evaluations)
+in every repetition, whereas a flat prior is still $18\%$ short of the
 optimum when the budget of 24 evaluations is exhausted.
 \end{abstract}
 
@@ -95,10 +95,15 @@ expensive evaluations are spent exclusively on learning the \emph{residual}
 between truth and proxy --- a function whose amplitude is bounded by the
 guarantee. Related ideas appear in multi-fidelity BO
 \citep{kennedy2000, forrester2007}, where cheap and expensive evaluations are
-modelled jointly, and in deep mean-function approaches; the variant presented
-here is deliberately minimal: it requires no evaluations of the expensive
-function to fit the relationship between fidelities, because that relationship
-is supplied a priori as a hard bound.
+modelled jointly, and more broadly in grey-box BO \citep{astudillo2021},
+which exploits known structure of the objective. The variant presented here
+is deliberately minimal: it requires no evaluations of the expensive function
+to fit the relationship between fidelities --- the auto-regressive coefficient
+and discrepancy process of \citet{kennedy2000} are replaced by an identity
+coupling and an amplitude bound, both supplied a priori by the user's
+guarantee. This matters precisely in the regime we target: with months per
+evaluation, there is no budget to learn the cross-fidelity relationship
+empirically.
 
 \section{Method}
 
@@ -130,8 +135,7 @@ We place on $f$ the Gaussian process prior
   \qquad
   k(x, x') = c^2\, \sigma(x)\, \sigma(x')\, \rho(x, x'),
 \end{equation}
-where $\rho$ is any correlation kernel ($\rho(x,x) = 1$; e.g.\ Mat\'ern-5/2,
-rational quadratic, or sums thereof) and
+where $\rho$ is a correlation kernel ($\rho(x,x) = 1$) and
 \begin{equation}
   \label{eq:sigma}
   \sigma(x) \;=\; \frac{\varepsilon(x)}{\kappa},
@@ -139,7 +143,18 @@ rational quadratic, or sums thereof) and
 with $\kappa > 0$ a confidence parameter discussed below. The kernel in
 \eqref{eq:prior} is the standard non-stationary scaling of a correlation
 kernel by an outer product of positive functions, and is therefore a valid
-(positive semi-definite) covariance.
+(positive semi-definite) covariance. In practice $\rho$ is obtained from an
+arbitrary base kernel $k_{\mathrm{b}}$ by normalising with its diagonal,
+\begin{equation}
+  \label{eq:corr}
+  \rho(x, x') \;=\;
+  \frac{k_{\mathrm{b}}(x, x')}{\sqrt{k_{\mathrm{b}}(x, x)\,k_{\mathrm{b}}(x', x')}},
+\end{equation}
+so that the construction stays calibrated even for base kernels with
+$k_{\mathrm{b}}(x,x) \neq 1$ --- kernel sums and spectral mixtures being the
+common offenders: a sum of two Mat\'ern kernels has $k_{\mathrm{b}}(x,x) = 2$
+and would otherwise silently inflate the band by $\sqrt{2}$ past the promised
+bound.
 
 Equation~\eqref{eq:prior} is most easily read through the residual
 $h = f - g$: the prior states $h \sim \mathcal{GP}(0, k)$ with pointwise
@@ -174,9 +189,10 @@ Two practical guards are worth stating. First, under a relative bound
 $\sigma(x) \to 0$ wherever $g(x) \to 0$, which pins the GP to the proxy and
 can destabilise Cholesky factorisations; a small floor
 $\varepsilon(x) \gets \max(\varepsilon(x), \varepsilon_{\mathrm{floor}})$
-restores numerical safety. Second, since $\rho(x,x) = 1$ exactly, the prior
-variance at any point is $c^2 \sigma(x)^2$ by construction --- there is no
-additional global outputscale to interfere with the calibration.
+restores numerical safety. Second, since $\rho(x,x) = 1$ exactly by
+\eqref{eq:corr}, the prior variance at any point is $c^2 \sigma(x)^2$ by
+construction --- there is no additional global outputscale to interfere with
+the calibration.
 
 \subsection{Interaction with data normalisation}
 
@@ -258,8 +274,9 @@ use a Mat\'ern-5/2 kernel with ARD, batches of $4$, $8$ initial random points
 followed by $16$ Bayesian-phase points (a total budget of $24$ evaluations),
 and \veropt{}'s defaults otherwise. The proxy-informed runs use $\kappa = 2$,
 a trainable amplitude $c \in (0.1, 1]$, and an absolute band floor of
-$\varepsilon_{\mathrm{floor}} = 0.01$. Each configuration is repeated over
-five random seeds.
+$\varepsilon_{\mathrm{floor}} = 0.01$. Each configuration is repeated five
+times with paired initial points (the torch seed is shared between arms; the
+acquisition optimiser retains its own stochasticity).
 
 \begin{table}[t]
   \centering
@@ -273,32 +290,48 @@ five random seeds.
     $n$ & Flat prior & Proxy-informed prior \\
     \midrule
     $8$ (random)  & $1.117 \pm 0.644$ & $1.117 \pm 0.644$ \\
-    $12$          & $1.806 \pm 0.491$ & $3.3152 \pm 0.0010$ \\
-    $16$          & $2.052 \pm 0.155$ & $3.3178 \pm 0.0041$ \\
-    $20$          & $2.571 \pm 0.186$ & $3.3178 \pm 0.0041$ \\
-    $24$          & $2.679 \pm 0.190$ & $3.3178 \pm 0.0041$ \\
+    $12$          & $1.719 \pm 0.451$ & $3.3152 \pm 0.0010$ \\
+    $16$          & $2.108 \pm 0.387$ & $3.3177 \pm 0.0041$ \\
+    $20$          & $2.562 \pm 0.247$ & $3.3177 \pm 0.0041$ \\
+    $24$          & $2.731 \pm 0.276$ & $3.3193 \pm 0.0041$ \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Table~\ref{tab:results} reports the best objective value found as a function
-of the number of evaluations $n$, over five shared seeds (the $8$ initial
-random points are identical between the two arms). The effect of the prior is
-immediate: after a \emph{single} Bayesian batch ($n = 12$), every
-proxy-informed run sits within $0.008$ of the global optimum --- a relative
-optimality gap below $0.3\%$, i.e.\ at the scale of the proxy's own error
-band --- and the across-seed spread collapses from $\pm 0.49$ to
-$\pm 0.001$. The flat prior, by contrast, is still climbing at the end of the
-budget and terminates $0.64$ below the optimum on average (a $19\%$ gap) with
-fifty times the seed-to-seed variability. Reading the comparison in terms of
-evaluations rather than attained value: the proxy-informed optimiser needs
-$12$ evaluations to surpass the level the flat prior has not yet reached after
-$24$. For an objective costing months per evaluation, this is the difference
-between one and several years of computation. We note the benchmark is
-deliberately favourable --- the proxy is everywhere within $1\%$ of the truth
-and the distortion is smooth --- but this is precisely the regime the method
-is designed for, and the guarantee that makes it favourable is one the user
-must certify, not one the method assumes silently.
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\linewidth]{convergence}
+  \caption{Best objective value found versus number of expensive evaluations
+  on Hartmann-6 (mean over five paired repetitions; shaded bands are one
+  standard deviation). The two arms share their $8$ random initial points, so
+  the curves coincide up to the dashed line. The first point suggested by the
+  proxy-informed model already lands at the global optimum.}
+  \label{fig:convergence}
+\end{figure}
+
+Figure~\ref{fig:convergence} and Table~\ref{tab:results} report the best
+objective value found as a function of the number of evaluations $n$, over
+five paired repetitions (the $8$ initial random points are identical between
+the two arms). The effect of the prior is immediate: the \emph{first}
+model-suggested point already lands at the global optimum, and after one
+Bayesian batch ($n = 12$) every proxy-informed run sits within $0.008$ of the
+optimum --- a relative optimality gap of $0.2\%$, i.e.\ at the scale of the
+proxy's own error band --- while the across-repetition spread collapses from
+$\pm 0.45$ to $\pm 0.001$. The flat prior, by contrast, is still climbing at
+the end of the budget and terminates $0.59$ below the optimum on average (an
+$18\%$ gap) with nearly seventy times the spread. Reading the comparison in
+terms of evaluations rather than attained value: the proxy-informed optimiser
+needs $12$ evaluations to surpass the level the flat prior has not reached
+after $24$. For an objective costing months per evaluation, this is the
+difference between one and several years of computation. The trained
+amplitude factor is doing its intended work: across repetitions it settled at
+$c \in [0.69, 0.89]$, i.e.\ the marginal likelihood tightened the band
+$10$--$30\%$ below the worst-case bound without ever being allowed to exceed
+it. We note the benchmark is deliberately favourable --- the proxy is
+everywhere within $1\%$ of the truth and the distortion is smooth --- but
+this is precisely the regime the method is designed for, and the guarantee
+that makes it favourable is one the user must certify, not one the method
+assumes silently.
 
 \section{Limitations and future work}
 
@@ -345,6 +378,12 @@ The proxy-informed prior is implemented in \veropt{}, developed by Aster
 Stoustrup and collaborators; this work builds directly on that foundation.
 
 \begin{thebibliography}{9}
+
+\bibitem[Astudillo and Frazier(2021)]{astudillo2021}
+R.~Astudillo and P.~I. Frazier.
+\newblock Thinking inside the box: A tutorial on grey-box Bayesian
+  optimization.
+\newblock In \emph{Proceedings of the 2021 Winter Simulation Conference}, 2021.
 
 \bibitem[Forrester et~al.(2007)]{forrester2007}
 A.~I.~J. Forrester, A.~S\'obester, and A.~J. Keane.
