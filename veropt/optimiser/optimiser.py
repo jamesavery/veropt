@@ -491,6 +491,14 @@ class BayesianOptimiser(SavableClass):
                 normaliser_objectives=self._normaliser_objectives
             )
 
+            # The normalisation round trip can leave values a float rounding error outside the bounds
+            self.suggested_points_real_units.variable_values = (
+                self.suggested_points_real_units.variable_values.clamp(
+                    min=self._bounds_real_units[0],
+                    max=self._bounds_real_units[1]
+                )
+            )
+
         else:
 
             self.suggested_points_real_units = SuggestedPoints(
@@ -884,6 +892,12 @@ class BayesianOptimiser(SavableClass):
             assert self._normaliser_variables is not None, "Normaliser must be initialised at this point"
 
             variables_real_units = self._normaliser_variables.inverse_transform(variable_values_flagged.tensor)
+
+            # The normalisation round trip can leave values a float rounding error outside the bounds
+            variables_real_units = variables_real_units.clamp(
+                min=self._bounds_real_units[0],
+                max=self._bounds_real_units[1]
+            )
 
         else:
             variables_real_units = variable_values_flagged.tensor

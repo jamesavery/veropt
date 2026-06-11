@@ -72,6 +72,10 @@ class DistortedHartmannProxy(ProxyMeanFunction):
             variable_values: torch.Tensor
     ) -> torch.Tensor:
 
+        # Normalisation round trips can put values a float rounding error outside the bounds,
+        # which botorch's test functions reject
+        variable_values = variable_values.clamp(0.0, 1.0)
+
         true_values = self.function(variable_values)
 
         return true_values * (1.0 + 0.01 * torch.sin(6.0 * torch.pi * variable_values[:, 0]))

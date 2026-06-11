@@ -24,3 +24,11 @@ venv/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# LaTeX build artefacts
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg

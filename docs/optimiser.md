@@ -152,7 +152,8 @@ where a relative-bound proxy crosses zero, which otherwise pins the GP and can u
 Caveats: the bound is encoded softly (a 2σ Gaussian band, not a hard constraint); the proxy is
 called thousands of times per suggestion step inside dual annealing, so it should cost well under
 a second; the proxy is evaluated without gradients (fine for the current derivative-free
-acquisition optimisers). Saving/loading works like user-defined objectives: the
+acquisition optimisers); normalisation round-trips can hand the proxy points a float-epsilon
+outside the variable bounds, so proxies with strictly validated domains should clamp their input. Saving/loading works like user-defined objectives: the
 `ProxyMeanFunction` subclass must be importable when the state file is loaded. See
 `examples/example_proxy_informed_prior.py`.
 

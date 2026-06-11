@@ -46,6 +46,10 @@ class DistortedHartmannProxy(ProxyMeanFunction):
             variable_values: torch.Tensor
     ) -> torch.Tensor:
 
+        # The proxy can receive values a floating point rounding error outside the bounds,
+        # so functions with a strictly validated domain (like botorch's) should clamp
+        variable_values = variable_values.clamp(0.0, 1.0)
+
         true_values = self.function(variable_values)
 
         return true_values * (1.0 + 0.01 * torch.sin(6.0 * torch.pi * variable_values[:, 0]))
