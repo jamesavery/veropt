@@ -11,17 +11,42 @@
 \usepackage[colorlinks=true, linkcolor=blue!60!black, citecolor=blue!60!black, urlcolor=blue!60!black]{hyperref}
 \usepackage{xcolor}
 \usepackage{listings}
+\usepackage[font=small,labelfont=bf]{caption}
+
+% --- Muted, print-friendly syntax-highlighting palette for the listings ---
+\definecolor{codekw}{HTML}{1F4E8C}      % keywords          -- dark blue
+\definecolor{codestr}{HTML}{9E3722}     % strings           -- brick red
+\definecolor{codecomment}{HTML}{3F5B59} % comments          -- dark teal-grey (legible)
+\definecolor{codeconst}{HTML}{7E3AA0}   % None/True/False   -- purple
+\definecolor{codeself}{HTML}{6E5A86}    % self              -- soft violet-grey
+\definecolor{codelib}{HTML}{8A5A1E}     % torch/builtins    -- amber
+\definecolor{codeframe}{HTML}{B9C2CC}   % frame rule        -- light blue-grey
+\definecolor{codebg}{HTML}{F7F8FA}      % background tint    -- very light grey
 
 \lstset{
   basicstyle=\ttfamily\small,
-  breaklines=true,
-  frame=single,
-  framerule=0.2pt,
   language=Python,
+  breaklines=true,
+  breakatwhitespace=false,
   showstringspaces=false,
-  commentstyle=\color{black!55},
-  aboveskip=1.2ex,
-  belowskip=1.2ex
+  keepspaces=true,
+  frame=single,
+  framerule=0.6pt,
+  rulecolor=\color{codeframe},
+  backgroundcolor=\color{codebg},
+  framesep=4pt,
+  aboveskip=1.5ex,
+  belowskip=1.5ex,
+  keywordstyle=\color{codekw}\bfseries,
+  keywordstyle=[2]\color{codeconst}\bfseries,
+  commentstyle=\color{codecomment},
+  stringstyle=\color{codestr},
+  emph={self},
+  emphstyle=\color{codeself}\itshape,
+  emph=[2]{torch,gpytorch,botorch,veropt,super,range,float,int,isinstance,property},
+  emphstyle=[2]\color{codelib},
+  morekeywords={with,as,assert,nonlocal,async,await,lambda,yield},
+  morekeywords=[2]{None,True,False},
 }
 
 % Long typewriter identifiers cannot hyphenate; let TeX loosen lines instead
@@ -32,6 +57,9 @@
 \newcommand{\real}{\mathbb{R}}
 \newcommand{\E}{\mathbb{E}}
 \newcommand{\code}[1]{\texttt{#1}}
+
+% Slightly airier rows in the tables
+\renewcommand{\arraystretch}{1.15}
 
 \title{Proxy-Informed Gaussian Process Priors for\\
 Bayesian Optimisation of Very Expensive Objectives}
