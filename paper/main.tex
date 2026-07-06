@@ -2,6 +2,7 @@
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
+\usepackage[margin=2.6cm]{geometry}
 \usepackage{amsmath,amssymb,amsthm}
 \usepackage{booktabs}
 \usepackage{graphicx}
@@ -17,12 +18,20 @@
   frame=single,
   framerule=0.2pt,
   language=Python,
-  showstringspaces=false
+  showstringspaces=false,
+  commentstyle=\color{black!55},
+  aboveskip=1.2ex,
+  belowskip=1.2ex
 }
+
+% Long typewriter identifiers cannot hyphenate; let TeX loosen lines instead
+\emergencystretch=3em
+\tolerance=2000
 
 \newcommand{\veropt}{\textsf{veropt}}
 \newcommand{\real}{\mathbb{R}}
 \newcommand{\E}{\mathbb{E}}
+\newcommand{\code}[1]{\texttt{#1}}
 
 \title{Proxy-Informed Gaussian Process Priors for\\
 Bayesian Optimisation of Very Expensive Objectives}
@@ -31,7 +40,7 @@ Bayesian Optimisation of Very Expensive Objectives}
   \small Department of Computer Science, University of Copenhagen\\
   \small \texttt{avery@diku.dk}}
 
-\date{June 2026 --- working draft}
+\date{July 2026 --- working draft}
 
 \begin{document}
 
@@ -53,13 +62,15 @@ heteroscedastically so that the prior standard deviation at every point is the
 promised deviation band. The bound is treated as a hard upper limit on the
 prior amplitude --- a single trainable scale factor may tighten the band as
 data accumulates but is constrained never to exceed it. The construction
-composes with arbitrary stationary correlation kernels, survives the data
-renormalisation used in practical BO implementations, and is available in the
-open-source package \veropt{}. On the six-dimensional Hartmann benchmark with
-a proxy distorted by at most 1\%, the proxy-informed prior comes within
-$0.2\%$ of the global optimum after a single Bayesian batch (12 evaluations)
-in every repetition, whereas a flat prior is still $18\%$ short of the
-optimum when the budget of 24 evaluations is exhausted.
+composes with arbitrary stationary correlation kernels and survives the data
+renormalisation used in practical BO implementations. We document the
+implementation in the open-source package \veropt{} down to the level of the
+code that realises each equation, give a user guide with a complete,
+runnable example, and benchmark the method: on the six-dimensional Hartmann
+function with a proxy distorted by at most 1\%, the proxy-informed prior comes
+within $0.2\%$ of the global optimum after a single Bayesian batch (12
+evaluations) in every repetition, whereas a flat prior is still $18\%$ short
+of the optimum when the budget of 24 evaluations is exhausted.
 \end{abstract}
 
 \section{Introduction}
@@ -105,12 +116,27 @@ guarantee. This matters precisely in the regime we target: with months per
 evaluation, there is no budget to learn the cross-fidelity relationship
 empirically.
 
+The paper is organised so that a reader can go from the mathematics to a
+working optimisation of their own problem. Section~\ref{sec:method} develops
+the construction and the two subtleties that make it work in practice
+(kernel-diagonal calibration and behaviour under data whitening).
+Section~\ref{sec:implementation} documents how the construction is realised
+in the open-source package \veropt{} \citep{veropt}, quoting the code that
+implements each equation and describing every change made to the existing
+optimiser core. Section~\ref{sec:usage} is a user guide: the contract a proxy
+must satisfy, the configuration options, a complete runnable example, and a
+recipe for adapting it to a new problem. Section~\ref{sec:experiments}
+benchmarks the method.
+
 \section{Method}
+\label{sec:method}
 
 \subsection{Setting}
 
 Let $f \colon X \subset \real^d \to \real$ be the expensive objective, to be
-maximised under a budget of $N \sim 10^2$ evaluations. Let
+maximised under a budget of $N \sim 10^2$ evaluations. (\veropt{} always
+maximises; an objective to be minimised, such as an energy, is negated ---
+nothing in the construction depends on the sign convention.) Let
 $g \colon X \to \real$ be a fast proxy ($\mu$s--s per evaluation), and assume
 the pointwise guarantee
 \begin{equation}
@@ -121,8 +147,8 @@ the pointwise guarantee
 with $\varepsilon$ known. The two cases of practical interest are the
 \emph{relative} bound $\varepsilon(x) = r\,\lvert g(x)\rvert$ (``$f$ is within
 $1\%$ of $g$'', $r = 0.01$) and the \emph{absolute} bound
-$\varepsilon(x) = \varepsilon_0$. Nothing is assumed about the locations of
-the optima of $f$ and $g$.
+$\varepsilon(x) = \varepsilon_0$ (``$f$ is within $1$~kcal/mol of $g$'').
+Nothing is assumed about the locations of the optima of $f$ and $g$.
 
 \subsection{The proxy-informed prior}
 
@@ -140,10 +166,16 @@ where $\rho$ is a correlation kernel ($\rho(x,x) = 1$) and
   \label{eq:sigma}
   \sigma(x) \;=\; \frac{\varepsilon(x)}{\kappa},
 \end{equation}
-with $\kappa > 0$ a confidence parameter discussed below. The kernel in
+with $\kappa > 0$ a confidence parameter discussed below, and $c \in (0, 1]$
+a global amplitude factor discussed in Section~\ref{sec:cap}. The kernel in
 \eqref{eq:prior} is the standard non-stationary scaling of a correlation
-kernel by an outer product of positive functions, and is therefore a valid
-(positive semi-definite) covariance. In practice $\rho$ is obtained from an
+kernel by an outer product of positive functions, and is a valid covariance:
+for any finite set of points $\{x_i\}$ the Gram matrix factors as
+$K = D R D$ with $D = \operatorname{diag}\bigl(c\,\sigma(x_i)\bigr)$ and $R$
+the (positive semi-definite) correlation Gram matrix, and congruence by a
+diagonal matrix preserves positive semi-definiteness.
+
+In practice $\rho$ is obtained from an
 arbitrary base kernel $k_{\mathrm{b}}$ by normalising with its diagonal,
 \begin{equation}
   \label{eq:corr}
@@ -154,7 +186,12 @@ so that the construction stays calibrated even for base kernels with
 $k_{\mathrm{b}}(x,x) \neq 1$ --- kernel sums and spectral mixtures being the
 common offenders: a sum of two Mat\'ern kernels has $k_{\mathrm{b}}(x,x) = 2$
 and would otherwise silently inflate the band by $\sqrt{2}$ past the promised
-bound.
+bound. Because $\rho(x,x) = 1$ exactly by \eqref{eq:corr}, the prior variance
+at any point is $c^2 \sigma(x)^2$ by construction --- there is no additional
+global outputscale to interfere with the calibration. The hyperparameters of
+$k_{\mathrm{b}}$ (e.g.\ ARD lengthscales) remain free and are trained as
+usual; they control the \emph{correlation structure} of the residual, while
+its \emph{amplitude} is fixed by the guarantee.
 
 Equation~\eqref{eq:prior} is most easily read through the residual
 $h = f - g$: the prior states $h \sim \mathcal{GP}(0, k)$ with pointwise
@@ -166,13 +203,26 @@ point; $\kappa = 3$ gives ${\sim}99.7\%$. The bound is thus encoded
 \emph{softly} --- a GP cannot represent a hard truncation --- and $\kappa$
 expresses how literally the guarantee is taken. We default to $\kappa = 2$.
 
+A worked number makes the calibration concrete. Suppose the objective is a
+negated total energy and the proxy predicts $g(x) = -50.0$ energy units at
+some point $x$, with a relative guarantee of $1\%$ ($r = 0.01$). Then
+$\varepsilon(x) = 0.01 \times 50.0 = 0.5$, and with $\kappa = 2$ the prior at
+$x$ is $f(x) \sim \mathcal{N}(-50.0,\, 0.25^2)$: its central $\pm 2\sigma$
+interval is $[-50.5, -49.5]$ --- exactly the promised band. Far from any
+expensive evaluation the posterior returns to this prior, so the surrogate is
+never more ignorant than the guarantee allows, anywhere. If training later
+tightens the amplitude to $c = 0.8$ (Section~\ref{sec:cap}), the band at $x$
+narrows to $\pm 0.4$.
+
 \subsection{The bound as a hard cap on a trained amplitude}
+\label{sec:cap}
 
 The guarantee \eqref{eq:bound} is an \emph{upper} bound: the proxy may well be
 better than its worst case. We therefore make the global amplitude factor $c$
 in \eqref{eq:prior} a hyperparameter, trained alongside the kernel
 lengthscales by type-II maximum likelihood, but constrained to
 \begin{equation}
+  \label{eq:cap}
   c \in (c_{\min}, \, 1],
 \end{equation}
 implemented by a sigmoidal reparametrisation (a \texttt{gpytorch}
@@ -185,38 +235,54 @@ evaluations. The floor $c_{\min}$ (default $0.1$) prevents overconfident
 collapse from the handful of points available early on. Setting $c$ constant
 at $1$ recovers the literal worst-case prior.
 
-Two practical guards are worth stating. First, under a relative bound
-$\sigma(x) \to 0$ wherever $g(x) \to 0$, which pins the GP to the proxy and
-can destabilise Cholesky factorisations; a small floor
-$\varepsilon(x) \gets \max(\varepsilon(x), \varepsilon_{\mathrm{floor}})$
-restores numerical safety. Second, since $\rho(x,x) = 1$ exactly by
-\eqref{eq:corr}, the prior variance at any point is $c^2 \sigma(x)^2$ by
-construction --- there is no additional global outputscale to interfere with
-the calibration.
+One practical guard is worth stating here because it shapes the user-facing
+options: under a relative bound $\sigma(x) \to 0$ wherever $g(x) \to 0$,
+which pins the GP to the proxy and can destabilise Cholesky factorisations. A
+small floor $\varepsilon(x) \gets \max(\varepsilon(x),
+\varepsilon_{\mathrm{floor}})$ restores numerical safety; the user chooses
+$\varepsilon_{\mathrm{floor}}$ in the objective's own units.
 
 \subsection{Interaction with data normalisation}
+\label{sec:normalisation}
 
-Practical BO implementations whiten their data: inputs and observed objective
-values are affinely normalised (zero mean, unit variance per dimension), and
-the normalisers are refitted as new evaluations arrive. The proxy, by
-contrast, is defined in physical units. The prior mean must therefore be
-evaluated as
+Practical BO implementations whiten their data, and this is where a naive
+implementation of \eqref{eq:prior} silently breaks. In \veropt{}, inputs and
+observed objective values are affinely normalised to zero mean and unit
+variance per dimension,
 \begin{equation}
-  \tilde m(\tilde x) \;=\; T_y\bigl(g(T_x^{-1}(\tilde x))\bigr),
+  T_x(x) = (x - \mu_x) \oslash s_x,
+  \qquad
+  T_y(y) = (y - \mu_y) / s_y,
 \end{equation}
-where $T_x, T_y$ are the \emph{current} input and output normalisations and
-tildes denote whitened quantities. The band, being the standard deviation of a
-\emph{deviation} rather than a value, transforms through the scale of $T_y$
-only:
+(with $\oslash$ elementwise division), and --- crucially --- the normalisers
+are \emph{refitted} as new evaluations arrive, by default at every step in
+the multi-objective case. The GP model lives entirely in whitened
+coordinates; the proxy is defined in physical units. The prior mean must
+therefore be evaluated as
 \begin{equation}
-  \tilde\sigma(\tilde x) \;=\; T_y\bigl(\sigma(x)\bigr) - T_y(0)
-  \;=\; \sigma(x) / s_y,
+  \label{eq:meannorm}
+  \tilde m(\tilde x) \;=\; T_y\bigl(g(T_x^{-1}(\tilde x))\bigr)
+  \;=\; \frac{g(T_x^{-1}(\tilde x)) - \mu_y}{s_y},
 \end{equation}
-with $s_y$ the output scale --- applying the full affine map here would be
-incorrect, silently shifting the band by the normalisation offset. Because the
-normalisers change between refits, the implementation binds them to the mean
-and kernel by late-bound closures that read the current normaliser at call
-time.
+where tildes denote whitened quantities. The band, being the standard
+deviation of a \emph{deviation} rather than a value, transforms through the
+scale of $T_y$ only:
+\begin{equation}
+  \label{eq:sigmanorm}
+  \tilde\sigma(\tilde x) \;=\; \sigma(x) / s_y
+  \;=\; T_y\bigl(\sigma(x)\bigr) - T_y(0);
+\end{equation}
+applying the full affine map here would be incorrect, silently shifting the
+band by the normalisation offset $\mu_y / s_y$. The second identity in
+\eqref{eq:sigmanorm} is how the implementation computes the scale-only
+transform: it only ever holds the normaliser as an opaque callable, and
+$T_y(\sigma) - T_y(0)$ extracts the scale without access to the normaliser's
+parameters, for any affine $T_y$.
+
+Because the normalisers change between refits, the mean and kernel cannot
+capture $T_x, T_y$ once at construction time; the implementation instead
+binds them by \emph{late-bound closures} that read the current normaliser at
+call time (Section~\ref{sec:wiring}).
 
 \subsection{Cost}
 
@@ -228,16 +294,435 @@ methods) dominate the suggestion step and benefit from memoisation, which we
 leave as future work. Against an objective costing days to months per
 evaluation, even the un-memoised cost is irrelevant.
 
-\section{Implementation}
+\section{Implementation in \veropt{}}
+\label{sec:implementation}
 
 The method is implemented in the open-source Bayesian optimisation package
 \veropt{} \citep{veropt}, which was built for tuning the VEROS ocean simulator
 \citep{hafner2018} and targets exactly the expensive-objective regime
-considered here. The user subclasses a savable \texttt{ProxyMeanFunction}
-(physical units in, physical units out) and passes it through the model
-configuration:
+considered here. This section documents the implementation at the level of
+the code, both as a map for readers of the source and as a template for
+adding the construction to other GP stacks. Listings are taken verbatim from
+the package, with type annotations, docstrings, and defensive assertions
+elided for brevity; the named source files are authoritative.
+Table~\ref{tab:mathtocode} maps each equation to the code that realises it.
+
+\begin{table}[t]
+  \centering
+  \caption{Where each piece of the mathematics lives in the code. All paths
+  are relative to \code{veropt/optimiser/}.}
+  \label{tab:mathtocode}
+  \small
+  \begin{tabular}{lll}
+    \toprule
+    Quantity & Equation & Code \\
+    \midrule
+    proxy $g$ & --- & user subclass of \code{ProxyMeanFunction} \\
+    whitened mean $\tilde m$ & \eqref{eq:meannorm} & \code{ProxyMean.forward} \\
+    band $\sigma(x)$, whitened & \eqref{eq:sigma}, \eqref{eq:sigmanorm} & \code{ProxyScaledKernel.\_amplitude} \\
+    scale-only transform & \eqref{eq:sigmanorm} & \code{scale\_objectives\_to\_normalised} \\
+    correlation $\rho$ & \eqref{eq:corr} & \code{ProxyScaledKernel.forward} \\
+    full kernel $k$ & \eqref{eq:prior} & \code{ProxyScaledKernel.forward} \\
+    amplitude cap $c \in (c_{\min}, 1]$ & \eqref{eq:cap} & \code{Interval} on \code{raw\_amplitude\_factor} \\
+    late-bound $T_x^{-1}, T_y$ & \S\ref{sec:normalisation} & closure getters in \code{optimiser.py} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{The host: \veropt{}'s model stack}
+
+To read the changes, four facts about the package suffice.
+(i)~\code{BayesianOptimiser} (\code{optimiser.py}) drives the loop and holds
+all data in physical (``real'') units; it owns the normalisers and refits
+them as configured. (ii)~The surrogate is a \code{GPyTorchFullModel}
+(\code{model.py}): a list of \emph{independent} single-objective GPs
+(\code{GPyTorchSingleModel}), one per objective. Each single model holds a
+\code{mean\_module} (by default \code{gpytorch.means.\allowbreak{}ConstantMean()}) and a
+kernel; the six kernels offered by the package (Mat\'ern, double Mat\'ern,
+rational quadratic, a rational-quadratic--Mat\'ern product, spectral mixture,
+spectral delta) are subclasses configuring that pair. (iii)~Training builds a
+fresh \code{ExactGP} around the current (whitened) data and runs Adam on the
+exact marginal log-likelihood; the mean and kernel \emph{modules} persist
+across steps, so hyperparameters carry over. (iv)~Everything the model sees
+--- training data, acquisition queries --- is in whitened units.
+
+The feature therefore decomposes into: a new self-contained module
+supplying the mean and the kernel wrapper (\S\ref{sec:newmodule}); small
+changes to the model classes to install them and keep serialisation working
+(\S\ref{sec:wiring}); plumbing that hands the current normalisers to the
+model at the right moment (\S\ref{sec:wiring}); and the user-facing
+configuration surface (\S\ref{sec:api}). The acquisition functions, the
+acquisition optimisers, the normalisers, the training loop, and the plotting
+code are untouched.
+
+\subsection{The new module: \code{proxy\_prior.py}}
+\label{sec:newmodule}
+
+\paragraph{The user contract: \code{ProxyMeanFunction}.} The user supplies
+the proxy by subclassing \code{ProxyMeanFunction}, an abstract savable class
+mirroring the package's objective classes: physical units in, physical units
+out. The base class validates shapes and finiteness around the user's
+\code{\_run} method --- input \code{[n\_points, n\_variables]}, output
+\code{[n\_points]} --- so a defective proxy fails loudly at the boundary
+rather than deep inside a Cholesky factorisation. A concrete subclass appears
+in the example of Section~\ref{sec:example}.
+
+\paragraph{The prior mean: \code{ProxyMean}.} A \code{gpytorch.means.Mean}
+that implements \eqref{eq:meannorm}. It holds the user's proxy and two
+initially unset normalisation closures, installed later by
+\code{update\_normalisation\_functions}:
 
 \begin{lstlisting}
+class ProxyMean(gpytorch.means.Mean):
+
+    def __init__(self, mean_function):
+        super().__init__()
+        self.mean_function = mean_function
+        self._unnormaliser_variables = None   # x-tilde -> x
+        self._normaliser_objectives = None    # y -> y-tilde
+
+    def evaluate_proxy_real_units(self, variable_values):
+        batch_shape = variable_values.shape[:-2]
+        n_points = variable_values.shape[-2]
+        n_variables = variable_values.shape[-1]
+
+        flattened_values = variable_values.reshape(-1, n_variables)
+
+        # The proxy is evaluated without gradients. This is safe with
+        # the current derivative-free acquisition optimisers but would
+        # silence gradients through the prior mean if a gradient-based
+        # acquisition optimiser is ever added.
+        with torch.no_grad():
+            variable_values_real_units = \
+                self._unnormaliser_variables(flattened_values)
+            proxy_values = self.mean_function(
+                variable_values=variable_values_real_units
+            )
+
+        return proxy_values.reshape(*batch_shape, n_points)
+
+    def forward(self, x):
+        proxy_values_real_units = \
+            self.evaluate_proxy_real_units(variable_values=x)
+        with torch.no_grad():
+            return self._normaliser_objectives(proxy_values_real_units)
+\end{lstlisting}
+
+\code{forward} is \eqref{eq:meannorm} read left to right: unwhiten the query
+points, evaluate the proxy, whiten the result. The reshape bookkeeping exists
+because \code{botorch} evaluates means on batched inputs
+\code{[..., n, d]} during acquisition optimisation, while the user contract
+is a plain \code{[n, d]} matrix; the batch dimensions are flattened for the
+proxy call and restored afterwards. The same class provides the scale-only
+transform of \eqref{eq:sigmanorm}, used by the kernel below:
+
+\begin{lstlisting}
+    def scale_objectives_to_normalised(self, objective_values):
+        # Transforms a *deviation* (rather than a value): applies only
+        # the scale of the normalisation, not the shift.
+        with torch.no_grad():
+            transformed_values = \
+                self._normaliser_objectives(objective_values)
+            transformed_zeros = \
+                self._normaliser_objectives(
+                    torch.zeros_like(objective_values))
+            return transformed_values - transformed_zeros
+\end{lstlisting}
+
+\paragraph{The prior covariance: \code{ProxyScaledKernel}.} A
+\code{gpytorch.kernels.\allowbreak{}Kernel} that wraps \emph{any} of the package's
+kernels as the base kernel $k_{\mathrm{b}}$ and implements \eqref{eq:prior}
+with the diagonal normalisation \eqref{eq:corr} built in. Writing the kernel
+as
+\begin{equation*}
+  k(x, x') \;=\;
+  \underbrace{\frac{c\,\sigma(x)}{\sqrt{k_{\mathrm{b}}(x,x)}}}_{a(x)}
+  \;
+  \underbrace{\frac{c\,\sigma(x')}{\sqrt{k_{\mathrm{b}}(x',x')}}}_{a(x')}
+  \; k_{\mathrm{b}}(x, x'),
+\end{equation*}
+the \code{forward} is an outer product of the vector $a$ with itself, times
+the base kernel matrix:
+
+\begin{lstlisting}
+class ProxyScaledKernel(gpytorch.kernels.Kernel):
+
+    has_lengthscale = False
+
+    def forward(self, x1, x2, diag=False, **params):
+        base_values = self._evaluate_base_kernel(
+            x1, x2, diag=diag, **params)
+
+        # Normalise the base kernel by its diagonal so it becomes a
+        # correlation kernel [eq. (4)]. Some kernels (sums of kernels,
+        # spectral mixtures) do not have k(x, x) = 1, which would
+        # silently inflate the prior band beyond the promised bound.
+        base_diagonal_1 = self._evaluate_base_kernel(
+            x1, x1, diag=True, **params).clamp(min=1e-12).sqrt()
+        base_diagonal_2 = self._evaluate_base_kernel(
+            x2, x2, diag=True, **params).clamp(min=1e-12).sqrt()
+
+        # a(x) = c * sigma(x) / sqrt(k_b(x, x))
+        amplitude_1 = self._amplitude(variable_values=x1) \
+            * self.amplitude_factor / base_diagonal_1
+        amplitude_2 = self._amplitude(variable_values=x2) \
+            * self.amplitude_factor / base_diagonal_2
+
+        if diag:
+            return amplitude_1 * amplitude_2 * base_values
+        else:
+            return amplitude_1.unsqueeze(-1) \
+                * amplitude_2.unsqueeze(-2) * base_values
+\end{lstlisting}
+
+The whitened band $\tilde\sigma$ of \eqref{eq:sigma}/\eqref{eq:sigmanorm} is
+computed by \code{\_amplitude}, which is where the relative/absolute bound
+choice, the $\kappa$ division, and the numerical floor live:
+
+\begin{lstlisting}
+    def _amplitude(self, variable_values):
+        if self.settings.bound_type == 'relative':
+            proxy_values_real_units = \
+                self.proxy_mean.evaluate_proxy_real_units(
+                    variable_values=variable_values)
+            band_real_units = (
+                self.settings.bound_value
+                * proxy_values_real_units.abs()
+            ).clamp(min=self.settings.amplitude_floor)
+
+        elif self.settings.bound_type == 'absolute':
+            band_real_units = torch.full(
+                size=variable_values.shape[:-1],
+                fill_value=self.settings.bound_value)
+
+        # sigma(x) = epsilon(x) / kappa          [eq. (3)]
+        sigma_real_units = \
+            band_real_units / self.settings.bound_in_n_sigmas
+
+        # sigma-tilde = T_y(sigma) - T_y(0)      [eq. (7)]
+        return self.proxy_mean.scale_objectives_to_normalised(
+            objective_values=sigma_real_units)
+\end{lstlisting}
+
+Note that \code{\_amplitude} works entirely in physical units until the last
+line --- the guarantee, the floor, and $\kappa$ all have physical meaning ---
+and only then applies the scale-only whitening. \code{ProxyScaledKernel}
+declares \code{has\_lengthscale = False}: it owns no lengthscale and no
+outputscale of its own, so the only hyperparameters under the optimiser's
+control are the base kernel's (reached through the child module) and the
+amplitude factor $c$.
+
+\paragraph{The amplitude cap.} The constraint \eqref{eq:cap} uses
+\code{gpytorch}'s standard reparametrisation machinery: the raw parameter is
+unconstrained, and an \code{Interval} constraint maps it through a scaled
+sigmoid into $(c_{\min}, 1]$. Gradient training can therefore push $c$
+towards the cap but never across it.
+
+\begin{lstlisting}
+        if settings.train_amplitude_factor:
+            self.register_parameter(
+                name='raw_amplitude_factor',
+                parameter=torch.nn.Parameter(torch.zeros(())))
+
+            # The deviation bound is an upper bound: the amplitude may
+            # shrink with training but can never exceed the bound.
+            self.register_constraint(
+                param_name='raw_amplitude_factor',
+                constraint=Interval(
+                    lower_bound=settings.amplitude_factor_lower_bound,
+                    upper_bound=1.0))
+
+            # The sigmoidal transform is infinite at the boundary, so
+            # initialise just inside the cap.
+            self.amplitude_factor = torch.tensor(0.99)
+\end{lstlisting}
+
+With \code{train\_amplitude\_factor} off, the parameter is never registered
+and the \code{amplitude\_factor} property returns the constant $1$: the
+literal worst-case prior. The initialisation at $0.99$ rather than $1.0$ is
+forced by the reparametrisation: the inverse sigmoid is infinite at the
+boundary.
+
+\paragraph{Settings.} All options travel in a small dataclass,
+\code{ProxyPriorSettings}, validated from the user-facing typed dictionary
+(Table~\ref{tab:settings} in Section~\ref{sec:usage}); \code{ProxyPrior}
+bundles the user's mean function with these settings and is the unit that the
+model classes install and serialise.
+
+\subsection{Wiring into the existing optimiser core}
+\label{sec:wiring}
+
+Four existing files were changed. The changes are small and local, which is
+the point of the design: the prior is confined to the mean and kernel
+modules, exactly where GP theory says it belongs.
+
+\paragraph{Installing the prior (\code{model.py}).} A
+\code{GPyTorchSingleModel} accepts a proxy prior only \emph{before} it has
+seen data --- swapping the prior under a trained model would silently
+invalidate its hyperparameters:
+
+\begin{lstlisting}
+    def set_proxy_prior(self, proxy_prior):
+        assert self.model_with_data is None, \
+            "The proxy prior must be set before the model is given data."
+
+        self.proxy_prior = proxy_prior
+
+        proxy_mean = ProxyMean(
+            mean_function=proxy_prior.mean_function)
+
+        self.mean_module = proxy_mean       # replaces ConstantMean
+        self.kernel = ProxyScaledKernel(    # wraps the chosen kernel
+            base_kernel=self.kernel,
+            proxy_mean=proxy_mean,
+            settings=proxy_prior.settings)
+\end{lstlisting}
+
+Because the base kernel is registered as a child module of the wrapper, its
+hyperparameters remain visible to the training loop and appear in the state
+dictionary under \code{covar\_module.base\_kernel.*} --- nothing else in the
+training machinery needs to know the wrapper exists.
+
+Three consequences did need attention. First, kernel-specific code
+(lengthscale constraints and getters in \code{kernels.py}) reaches for
+\code{model\_with\_data.covar\_module} expecting the base kernel; a new
+property transparently unwraps:
+
+\begin{lstlisting}
+    @property
+    def data_model_base_covar_module(self):
+        covar_module = self.model_with_data.covar_module
+        if isinstance(covar_module, ProxyScaledKernel):
+            return covar_module.base_kernel
+        else:
+            return covar_module
+\end{lstlisting}
+
+\noindent and the six kernel classes were mechanically switched to it.
+Second, \code{ProxyMean} --- unlike the \code{ConstantMean} it replaces ---
+has no trainable parameters, and \code{torch.optim.Adam} raises on an empty
+parameter group; the parameter groups handed to the optimiser are now
+filtered through a helper, \code{filter\_out\_empty\_parameter\_groups}.
+Third, serialisation: the saved state gains a \code{proxy\_prior} entry
+(the user proxy's name and constructor state plus the settings), and
+\code{from\_saved\_state} re-applies \code{set\_proxy\_prior} \emph{before}
+loading the state dictionary, so that the saved keys
+(\code{covar\_module.base\_kernel.*}, \code{raw\_amplitude\_factor}) find
+their modules. Files saved before the feature existed load unchanged.
+
+\paragraph{Handing over the normalisers (\code{optimiser.py},
+\code{prediction.py}).} Section~\ref{sec:normalisation} requires the mean
+and kernel to see the \emph{current} $T_x^{-1}$ and $T_y$, across refits.
+The optimiser exposes them as closures over \code{self}, so a single
+installation stays fresh forever:
+
+\begin{lstlisting}
+    def get_unnormaliser_function_variables(self):
+        def unnormalise_variables(variable_values):
+            if self.return_normalised_data:
+                variable_values = self._normaliser_variables \
+                    .inverse_transform(variable_values)
+            return variable_values
+        return unnormalise_variables
+\end{lstlisting}
+
+The closure reads \code{self.\_normaliser\_variables} at \emph{call} time,
+so a normaliser refit is picked up automatically; and if normalisation is
+disabled entirely (\code{normalise=False}), the guard makes the closure the
+identity and the whole construction transparently operates in physical
+units. The pair of closures is injected at the top of the optimiser's
+predictor update --- before training, because training is the first thing
+that evaluates the mean:
+
+\begin{lstlisting}
+    def _update_predictor(self, train=True):
+        # Must happen before training so the proxy prior mean can map
+        # between unit systems. The closures read the current
+        # normalisers at call time, so they survive refits.
+        self.predictor.update_model_normalisation_functions(
+            unnormaliser_variables=
+                self.get_unnormaliser_function_variables(),
+            normaliser_objectives=
+                self.get_normaliser_function_objectives())
+
+        self.predictor.update_with_new_data(
+            variable_values=self.evaluated_variable_values.tensor,
+            objective_values=self.evaluated_objective_values.tensor,
+            train=train)
+        ...
+\end{lstlisting}
+
+\code{update\_model\_normalisation\_functions} is a no-op on the
+\code{Predictor} base class and is forwarded by \code{BotorchPredictor} to
+the model, which forwards it to any \code{ProxyMean} present --- models
+without a proxy prior are untouched by the entire code path. In the
+multi-objective case each single-objective GP receives an adapter that
+restricts the $[\ldots, n_{\mathrm{obj}}]$ objective normaliser to its own
+column (\code{make\_single\_column\_objective\_normaliser}), since each GP
+whitens against its own objective's statistics.
+
+\subsection{The user-facing API (\code{constructors.py})}
+\label{sec:api}
+
+The package's constructor, \code{bayesian\_optimiser(...)}, configures the
+model through a typed dictionary; it gains two keys, \code{proxy\_prior} and
+\code{proxy\_prior\_settings}. A single proxy is broadcast to all
+objectives; a list supplies one entry per objective, with \code{None}
+leaving that objective at the uninformative default. Validation is eager and
+specific: a settings dictionary without a proxy, a list of the wrong length,
+a proxy whose \code{n\_variables} disagrees with the objective's, or an
+unknown settings key each fail at construction time with a message naming
+the offending objective. The mechanism composes with everything else the
+constructor does, because \code{set\_proxy\_prior} is applied to the
+freshly built single-objective models before any data reaches them.
+
+The implementation is exercised by 23 dedicated tests
+(\code{tests/test\_proxy\_prior.py}) covering the calibration identity
+$k(x,x) = c^2\tilde\sigma(x)^2$ for all six kernels (including the
+non-correlation ones), the scale-only whitening, the amplitude cap under
+training, multi-objective mixing, serialisation round-trips, and constructor
+validation --- a useful specification of intended behaviour for readers
+extending the feature.
+
+\section{Using proxy-informed priors}
+\label{sec:usage}
+
+This section is the user guide: what a proxy must satisfy, what the options
+mean, and a complete example to copy from.
+
+\subsection{Writing a proxy}
+
+The proxy is a subclass of \code{ProxyMeanFunction} (importable directly
+from \code{veropt}) with three obligations:
+
+\begin{enumerate}
+  \item \textbf{A unique \code{name} class attribute.} It identifies the
+    class in save files, exactly as for user-defined objectives.
+  \item \textbf{A \code{\_run} method in physical units, vectorised over
+    points.} Input is a \code{torch} tensor of shape
+    \code{[n\_points, n\_variables]} holding real variable values; output is
+    the proxy objective per point, shape \code{[n\_points]} (a column
+    \code{[n\_points, 1]} is accepted and flattened). Since \veropt{}
+    maximises, a proxy for an energy to be minimised returns the negated
+    energy.
+  \item \textbf{Tolerance of boundary round-off.} Whitening and unwhitening
+    can hand the proxy points a floating-point epsilon outside the variable
+    bounds; a proxy with a strictly validated domain should clamp its input
+    (one line, visible in the example below).
+\end{enumerate}
+
+Speed matters: the proxy is called thousands of times per suggestion step
+inside the acquisition optimiser, so a call (over a whole batch of points)
+should cost well under a second. It is evaluated under \code{torch.no\_grad()},
+so it may use non-differentiable operations freely.
+
+\subsection{Configuring the optimiser}
+
+The proxy and its guarantee enter through the model choice dictionary:
+
+\begin{lstlisting}
+from veropt import bayesian_optimiser
+
 optimiser = bayesian_optimiser(
     n_initial_points=8,
     n_bayesian_points=32,
@@ -252,19 +737,207 @@ optimiser = bayesian_optimiser(
 )
 \end{lstlisting}
 
-Internally, a \texttt{ProxyMean} module supplies the mean of \eqref{eq:prior},
-and a \texttt{Proxy\-Scaled\-Kernel} wraps the chosen correlation kernel with
-the $c^2\sigma(x)\sigma(x')$ factor; the construction composes with every kernel
-offered by the package and with its per-step renormalisation, batch
-acquisition, and state serialisation. In the multi-objective case a proxy may
-be supplied per objective, with uninformed objectives left at the default
-prior.
+Two of these lines deserve comment. \code{bound\_value} is the guarantee and
+the only required setting: here, ``the true objective is within $1\%$ of the
+proxy''. And \code{n\_points\_before\_fitting} is lowered to a single batch:
+by default the model is first fitted only towards the end of the random
+initial phase, which is the right economy for an uninformative prior but
+wastes the head start an informative one provides --- with a proxy prior the
+model is worth fitting (and its amplitude factor worth training) as soon as
+the normalisers can be estimated. Table~\ref{tab:settings} lists all
+settings.
+
+\begin{table}[t]
+  \centering
+  \caption{\code{proxy\_prior\_settings} keys. ``Physical units'' means the
+  objective's own units, before any normalisation.}
+  \label{tab:settings}
+  \small
+  \begin{tabular}{llp{0.34\linewidth}}
+    \toprule
+    Key & Default & Meaning \\
+    \midrule
+    \code{bound\_value} & required &
+      $r$ (relative) or $\varepsilon_0$, physical units (absolute) \\
+    \code{bound\_type} & \code{'relative'} &
+      reading of \code{bound\_value}: \code{'relative'} or \code{'absolute'} \\
+    \code{bound\_in\_n\_sigmas} & \code{2.0} &
+      $\kappa$ in \eqref{eq:sigma}: band $=\kappa$ prior std.\ deviations \\
+    \code{train\_amplitude\_factor} & \code{True} &
+      train $c$ by marginal likelihood; else $c \equiv 1$ \\
+    \code{amplitude\_factor\_lower\_bound} & \code{0.1} &
+      $c_{\min}$ in \eqref{eq:cap} \\
+    \code{amplitude\_floor} & \code{0.0} &
+      $\varepsilon_{\mathrm{floor}}$, physical units; keeps $\sigma > 0$
+      where $g \approx 0$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+For multi-objective problems, supply one proxy (or \code{None}) and one
+settings dictionary (or \code{None}) per objective:
+
+\begin{lstlisting}
+    model={
+        'kernels': 'matern',
+        'proxy_prior': [energy_proxy, None],
+        'proxy_prior_settings': [{'bound_value': 0.01}, None],
+    },
+\end{lstlisting}
+
+Saving and loading work as for user-defined objectives:
+\code{save\_to\_json} stores the proxy's name, constructor state and
+settings, and \code{load\_optimiser\_from\_state} re-installs the prior ---
+provided the proxy subclass has been imported in the loading process, which
+is the same rule the package already imposes on objective classes.
+
+\subsection{A complete example}
+\label{sec:example}
+
+The listing below is the complete, runnable script shipped as
+\code{examples/\allowbreak{}example\_proxy\_informed\_prior.py}. The ``expensive''
+objective is the six-dimensional Hartmann function (a standard multimodal BO
+benchmark, maximised, $f^* = 3.3224$); the proxy is the same function with a
+$1\%$ multiplicative sinusoidal distortion, so the relative guarantee
+\code{bound\_value = 0.01} holds \emph{exactly} by construction while the
+distortion shifts the local geometry --- the honest analogue of a
+semi-empirical surface against a coupled-cluster one.
+
+\begin{lstlisting}
+from typing import Literal
+
+import botorch
+import torch
+
+from veropt import ProxyMeanFunction, bayesian_optimiser
+from veropt.optimiser.practice_objectives import Hartmann
+
+
+class DistortedHartmannProxy(ProxyMeanFunction):
+
+    name = 'distorted_hartmann_proxy'
+
+    def __init__(self, n_variables: int) -> None:
+        super().__init__(n_variables=n_variables)
+        self.function = botorch.test_functions.Hartmann(
+            dim=n_variables,
+            negate=True
+        )
+
+    def _run(self, variable_values: torch.Tensor) -> torch.Tensor:
+        # The proxy can receive values a floating point rounding
+        # error outside the bounds, so functions with a strictly
+        # validated domain (like botorch's) should clamp
+        variable_values = variable_values.clamp(0.0, 1.0)
+
+        true_values = self.function(variable_values)
+
+        return true_values * (
+            1.0 + 0.01 * torch.sin(
+                6.0 * torch.pi * variable_values[:, 0])
+        )
+
+
+n_variables: Literal[6] = 6
+n_evaluations_per_step = 4
+
+objective = Hartmann(n_variables=n_variables)
+
+proxy = DistortedHartmannProxy(n_variables=n_variables)
+
+optimiser = bayesian_optimiser(
+    n_initial_points=8,
+    n_bayesian_points=32,
+    n_evaluations_per_step=n_evaluations_per_step,
+    objective=objective,
+    model={
+        'kernels': 'matern',
+        'proxy_prior': proxy,
+        'proxy_prior_settings': {
+            # the objective is within 1% of the proxy...
+            'bound_value': 0.01,
+            # ...read as two standard deviations of the prior
+            'bound_in_n_sigmas': 2.0,
+            # keeps the prior variance away from zero where
+            # the proxy is near zero
+            'amplitude_floor': 0.01
+        }
+    },
+    n_points_before_fitting=n_evaluations_per_step
+)
+
+for step in range(4):
+    optimiser.run_optimisation_step()
+
+best_objective_value = float(
+    optimiser.evaluated_objectives_real_units.max())
+
+print(
+    f"\nBest objective value found: {best_objective_value:.4f} "
+    f"(the optimum is 3.3224)"
+)
+\end{lstlisting}
+
+To run it from a checkout of the repository (Python $> 3.13$):
+
+\begin{lstlisting}[language=bash]
+pip install .
+python examples/example_proxy_informed_prior.py
+\end{lstlisting}
+
+The four optimisation steps evaluate $16$ points: two batches of $4$ random
+initial points, then two model-suggested batches. The run recorded for this
+paper took four minutes on a single CPU core (the cost is dominated by the
+acquisition optimiser, not the GP) and finished with
+
+\begin{lstlisting}[language={}]
+Best objective value found: 3.3148 (the optimum is 3.3224)
+\end{lstlisting}
+
+\noindent a $0.2\%$ optimality gap after $16$ evaluations of the
+``expensive'' function, reached with the first model-suggested batch rather
+than gradually. Runs are not bit-reproducible (the acquisition optimiser
+draws from an unseeded global random state), but this behaviour is stable
+across repetitions; Section~\ref{sec:experiments} quantifies it over five
+paired repetitions against a flat prior.
+
+\subsection{Adapting the example to your own problem}
+
+The distance from the example to a real application is deliberately short:
+
+\begin{enumerate}
+  \item \textbf{Wrap your fast model.} Replace
+    \code{DistortedHartmannProxy.\_run} with your surrogate --- a harmonic
+    energy, a semi-empirical method, a coarse-grid simulation --- returning
+    the (negated, if minimising) objective per input row, in physical units.
+  \item \textbf{State your guarantee honestly.} A percentage bound
+    (``within $1\%$'') is \code{bound\_type='relative'} with
+    \code{bound\_value=0.01}; a uniform error bar (``within
+    $1$~kcal/mol'') is \code{bound\_type='absolute'} with
+    \code{bound\_value} in the objective's units. The bound is a promise the
+    optimiser will exploit: if the truth escapes the band, the model can
+    become confidently wrong and the acquisition may never look where the
+    truth is better than the proxy suggests. If any expensive evaluations
+    exist already, check them against the bound before promising it.
+  \item \textbf{Guard the zero crossings.} Under a relative bound, set
+    \code{amplitude\_floor} to a small value in physical units if the
+    objective changes sign or passes near zero anywhere in the domain.
+  \item \textbf{Start fitting early.} Set
+    \code{n\_points\_before\_fitting} equal to
+    \code{n\_evaluations\_per\_step}.
+  \item \textbf{Leave the rest alone.} Kernels, acquisition, batching and
+    normalisation all compose with the prior unchanged; multi-objective
+    problems take a list of proxies with \code{None} for uninformed
+    objectives.
+\end{enumerate}
 
 \section{Experiments}
+\label{sec:experiments}
 
-We use the six-dimensional Hartmann function (maximised, optimum
-$f^* = 3.3224$) as the ``expensive'' objective and construct a proxy by
-multiplicative harmonic distortion,
+We benchmark the example configuration of Section~\ref{sec:example} at a
+larger budget, against an identical optimiser with the default flat prior.
+The objective is the six-dimensional Hartmann function (maximised, optimum
+$f^* = 3.3224$) and the proxy is the multiplicative harmonic distortion
 \begin{equation}
   g(x) \;=\; f(x)\,\bigl(1 + 0.01 \sin(6\pi x_1)\bigr),
 \end{equation}
@@ -367,10 +1040,12 @@ installed directly into the Gaussian process prior of a Bayesian optimiser:
 proxy as prior mean, error band as (heteroscedastic) prior standard deviation,
 bound as a hard cap on a trained amplitude. The construction is exact in its
 bookkeeping (valid PSD covariance, correct behaviour under data whitening),
-composes with standard kernels and acquisition machinery, and in benchmark
-experiments converts a months-per-point optimisation that would otherwise
-spend its budget rediscovering known structure into one that starts at the
-proxy and spends every evaluation on the residual.
+composes with standard kernels and acquisition machinery, and is implemented
+in \veropt{} in one self-contained module plus a handful of local changes,
+documented here alongside a runnable example. In benchmark experiments it
+converts a months-per-point optimisation that would otherwise spend its
+budget rediscovering known structure into one that starts at the proxy and
+spends every evaluation on the residual.
 
 \section*{Acknowledgements}
 
