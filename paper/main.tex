@@ -332,7 +332,8 @@ considered here. This section documents the implementation at the level of
 the code, both as a map for readers of the source and as a template for
 adding the construction to other GP stacks. Listings are taken verbatim from
 the package, with type annotations, docstrings, and defensive assertions
-elided for brevity; the named source files are authoritative.
+elided and comments occasionally abridged or tagged with equation numbers;
+the named source files are authoritative.
 Table~\ref{tab:mathtocode} maps each equation to the code that realises it.
 
 \begin{table}[t]
@@ -347,9 +348,9 @@ Table~\ref{tab:mathtocode} maps each equation to the code that realises it.
     \midrule
     proxy $g$ & --- & user subclass of \code{ProxyMeanFunction} \\
     whitened mean $\tilde m$ & \eqref{eq:meannorm} & \code{ProxyMean.forward} \\
-    band $\sigma(x)$, whitened & \eqref{eq:sigma}, \eqref{eq:sigmanorm} & \code{ProxyScaledKernel.\_amplitude} \\
+    band $\sigma(x)$, whitened & \eqref{eq:sigma}, \eqref{eq:sigmanorm} & \code{ProxyScaledKernel.\_sigma} \\
     scale-only transform & \eqref{eq:sigmanorm} & \code{scale\_objectives\_to\_normalised} \\
-    correlation $\rho$ & \eqref{eq:corr} & \code{ProxyScaledKernel.forward} \\
+    correlation $\rho$ & \eqref{eq:corr} & \code{ProxyScaledKernel.\_scaling} \\
     full kernel $k$ & \eqref{eq:prior} & \code{ProxyScaledKernel.forward} \\
     amplitude cap $c \in (c_{\min}, 1]$ & \eqref{eq:cap} & \code{Interval} on \code{raw\_amplitude\_factor} \\
     late-bound $T_x^{-1}, T_y$ & \S\ref{sec:normalisation} & closure getters in \code{optimiser.py} \\
@@ -410,26 +411,29 @@ class ProxyMean(gpytorch.means.Mean):
         self._normaliser_objectives = None    # y -> y-tilde
 
     def evaluate_proxy_real_units(self, variable_values):
-        batch_shape = variable_values.shape[:-2]
-        n_points = variable_values.shape[-2]
-        n_variables = variable_values.shape[-1]
+        # g(T_x^{-1}(x)): unnormalise the query points, evaluate
+        # the proxy in real units
 
-        flattened_values = variable_values.reshape(-1, n_variables)
+        # botorch queries the mean with batched points
+        # [..., n_points, n_variables]; the proxy contract is a plain
+        # 2D matrix, so flatten and restore around the call
+        output_shape = variable_values.shape[:-1]
+        flattened_values = variable_values.reshape(
+            -1, variable_values.shape[-1])
 
-        # The proxy is evaluated without gradients. This is safe with
-        # the current derivative-free acquisition optimisers but would
-        # silence gradients through the prior mean if a gradient-based
-        # acquisition optimiser is ever added.
+        # Evaluated without gradients: safe with the current
+        # derivative-free acquisition optimisers
         with torch.no_grad():
-            variable_values_real_units = \
-                self._unnormaliser_variables(flattened_values)
             proxy_values = self.mean_function(
-                variable_values=variable_values_real_units
+                variable_values=self._unnormaliser_variables(
+                    flattened_values)
             )
 
-        return proxy_values.reshape(*batch_shape, n_points)
+        return proxy_values.reshape(output_shape)
 
     def forward(self, x):
+        # m(x) = T_y(g(T_x^{-1}(x))): the prior mean is the proxy,
+        # mapped through the current normalisations   [eq. (7)]
         proxy_values_real_units = \
             self.evaluate_proxy_real_units(variable_values=x)
         with torch.no_grad():
@@ -469,8 +473,9 @@ as
   \underbrace{\frac{c\,\sigma(x')}{\sqrt{k_{\mathrm{b}}(x',x')}}}_{a(x')}
   \; k_{\mathrm{b}}(x, x'),
 \end{equation*}
-the \code{forward} is an outer product of the vector $a$ with itself, times
-the base kernel matrix:
+the \code{forward} is nothing but this equation --- the outer product of the
+vector $a$ with itself, times the base kernel matrix --- with everything else
+delegated to named helpers:
 
 \begin{lstlisting}
 class ProxyScaledKernel(gpytorch.kernels.Kernel):
@@ -478,63 +483,75 @@ class ProxyScaledKernel(gpytorch.kernels.Kernel):
     has_lengthscale = False
 
     def forward(self, x1, x2, diag=False, **params):
+        # k(x, x') = a(x) a(x') k_b(x, x')       [eq. (2)]
+        scaling_1 = self._scaling(x1, **params)
+        scaling_2 = self._scaling(x2, **params)
+
         base_values = self._evaluate_base_kernel(
             x1, x2, diag=diag, **params)
 
-        # Normalise the base kernel by its diagonal so it becomes a
-        # correlation kernel [eq. (4)]. Some kernels (sums of kernels,
-        # spectral mixtures) do not have k(x, x) = 1, which would
-        # silently inflate the prior band beyond the promised bound.
-        base_diagonal_1 = self._evaluate_base_kernel(
-            x1, x1, diag=True, **params).clamp(min=1e-12).sqrt()
-        base_diagonal_2 = self._evaluate_base_kernel(
-            x2, x2, diag=True, **params).clamp(min=1e-12).sqrt()
-
-        # a(x) = c * sigma(x) / sqrt(k_b(x, x))
-        amplitude_1 = self._amplitude(variable_values=x1) \
-            * self.amplitude_factor / base_diagonal_1
-        amplitude_2 = self._amplitude(variable_values=x2) \
-            * self.amplitude_factor / base_diagonal_2
-
         if diag:
-            return amplitude_1 * amplitude_2 * base_values
+            return scaling_1 * scaling_2 * base_values
         else:
-            return amplitude_1.unsqueeze(-1) \
-                * amplitude_2.unsqueeze(-2) * base_values
+            return scaling_1.unsqueeze(-1) \
+                * scaling_2.unsqueeze(-2) * base_values
+\end{lstlisting}
+
+The scaling $a(x)$ divides by the base kernel's own diagonal --- the
+normalisation \eqref{eq:corr} that keeps the band calibrated for base kernels
+with $k_{\mathrm{b}}(x,x) \neq 1$:
+
+\begin{lstlisting}
+    def _scaling(self, variable_values, **params):
+        # a(x) = c * sigma(x) / sqrt(k_b(x, x))  [eq. (4)]
+        #   - dividing by the base kernel's diagonal makes it a
+        #     correlation kernel, so the prior variance is exactly
+        #     c^2 sigma(x)^2 even for base kernels with
+        #     k_b(x, x) != 1 (e.g. kernel sums, spectral mixtures)
+        base_diagonal = self._evaluate_base_kernel(
+            variable_values, variable_values, diag=True, **params
+        ).clamp(min=1e-12).sqrt()
+
+        return self.amplitude_factor * self._sigma(variable_values) \
+            / base_diagonal
 \end{lstlisting}
 
 The whitened band $\tilde\sigma$ of \eqref{eq:sigma}/\eqref{eq:sigmanorm} is
-computed by \code{\_amplitude}, which is where the relative/absolute bound
-choice, the $\kappa$ division, and the numerical floor live:
+computed by \code{\_sigma}, with the relative/absolute bound choice and the
+numerical floor kept apart in \code{\_deviation\_bound\_real\_units}:
 
 \begin{lstlisting}
-    def _amplitude(self, variable_values):
+    def _sigma(self, variable_values):
+        # sigma(x) = epsilon(x) / kappa           [eq. (3)]
+        sigma_real_units = \
+            self._deviation_bound_real_units(variable_values) \
+            / self.settings.bound_in_n_sigmas
+
+        # sigma-tilde = T_y(sigma) - T_y(0)       [eq. (8)]
+        return self.proxy_mean.scale_objectives_to_normalised(
+            objective_values=sigma_real_units)
+
+    def _deviation_bound_real_units(self, variable_values):
+        # epsilon(x): the promised pointwise deviation band,
+        # in real objective units                 [eq. (1)]
         if self.settings.bound_type == 'relative':
-            proxy_values_real_units = \
+            proxy_values = \
                 self.proxy_mean.evaluate_proxy_real_units(
                     variable_values=variable_values)
-            band_real_units = (
-                self.settings.bound_value
-                * proxy_values_real_units.abs()
+            return (
+                self.settings.bound_value * proxy_values.abs()
             ).clamp(min=self.settings.amplitude_floor)
 
         elif self.settings.bound_type == 'absolute':
-            band_real_units = torch.full(
+            return torch.full(
                 size=variable_values.shape[:-1],
                 fill_value=self.settings.bound_value)
-
-        # sigma(x) = epsilon(x) / kappa          [eq. (3)]
-        sigma_real_units = \
-            band_real_units / self.settings.bound_in_n_sigmas
-
-        # sigma-tilde = T_y(sigma) - T_y(0)      [eq. (7)]
-        return self.proxy_mean.scale_objectives_to_normalised(
-            objective_values=sigma_real_units)
 \end{lstlisting}
 
-Note that \code{\_amplitude} works entirely in physical units until the last
-line --- the guarantee, the floor, and $\kappa$ all have physical meaning ---
-and only then applies the scale-only whitening. \code{ProxyScaledKernel}
+Note that the band is computed entirely in physical units until the last
+line of \code{\_sigma} --- the guarantee, the floor, and $\kappa$ all have
+physical meaning --- and only then is the scale-only whitening applied.
+\code{ProxyScaledKernel}
 declares \code{has\_lengthscale = False}: it owns no lengthscale and no
 outputscale of its own, so the only hyperparameters under the optimiser's
 control are the base kernel's (reached through the child module) and the
