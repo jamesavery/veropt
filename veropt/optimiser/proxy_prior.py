@@ -231,29 +231,28 @@ class ProxyMean(gpytorch.means.Mean):  # type: ignore[misc]
             variable_values: torch.Tensor
     ) -> torch.Tensor:
 
+        # g(T_x^{-1}(x)): unnormalise the query points, evaluate the proxy in real units
+
         assert self._unnormaliser_variables is not None, (
             "The proxy prior's normalisation functions must be set before the model is used. "
             "(This should happen automatically when the optimiser updates its predictor.)"
         )
 
-        batch_shape = variable_values.shape[:-2]
-        n_points = variable_values.shape[-2]
-        n_variables = variable_values.shape[-1]
-
-        flattened_values = variable_values.reshape(-1, n_variables)
+        # botorch queries the mean with batched points [..., n_points, n_variables];
+        # the proxy contract is a plain 2D matrix, so flatten and restore around the call
+        output_shape = variable_values.shape[:-1]
+        flattened_values = variable_values.reshape(-1, variable_values.shape[-1])
 
         # The proxy is evaluated without gradients. This is safe with the current derivative-free
         # acquisition optimisers but would silence gradients through the prior mean if a
         # gradient-based acquisition optimiser is ever added.
         with torch.no_grad():
 
-            variable_values_real_units = self._unnormaliser_variables(flattened_values)
-
             proxy_values = self.mean_function(
-                variable_values=variable_values_real_units
+                variable_values=self._unnormaliser_variables(flattened_values)
             )
 
-        return proxy_values.reshape(*batch_shape, n_points)
+        return proxy_values.reshape(output_shape)
 
     def scale_objectives_to_normalised(
             self,
@@ -279,6 +278,9 @@ class ProxyMean(gpytorch.means.Mean):  # type: ignore[misc]
             self,
             x: torch.Tensor
     ) -> torch.Tensor:
+
+        # m(x) = T_y(g(T_x^{-1}(x))): the prior mean is the proxy, mapped through the
+        # current normalisations
 
         assert self._normaliser_objectives is not None, (
             "The proxy prior's normalisation functions must be set before the model is used. "
@@ -358,24 +360,26 @@ class ProxyScaledKernel(gpytorch.kernels.Kernel):  # type: ignore[misc]
             raw_amplitude_factor=self.raw_amplitude_factor_constraint.inverse_transform(value)
         )
 
-    def _amplitude(
+    def _deviation_bound_real_units(
             self,
             variable_values: torch.Tensor
     ) -> torch.Tensor:
 
+        # epsilon(x): the promised pointwise deviation band, in real objective units
+
         if self.settings.bound_type == 'relative':
 
-            proxy_values_real_units = self.proxy_mean.evaluate_proxy_real_units(
+            proxy_values = self.proxy_mean.evaluate_proxy_real_units(
                 variable_values=variable_values
             )
 
-            band_real_units = (self.settings.bound_value * proxy_values_real_units.abs()).clamp(
+            return (self.settings.bound_value * proxy_values.abs()).clamp(
                 min=self.settings.amplitude_floor
             )
 
         elif self.settings.bound_type == 'absolute':
 
-            band_real_units = torch.full(
+            return torch.full(
                 size=variable_values.shape[:-1],
                 fill_value=self.settings.bound_value
             )
@@ -383,11 +387,35 @@ class ProxyScaledKernel(gpytorch.kernels.Kernel):  # type: ignore[misc]
         else:
             raise ValueError(f"Unknown bound type: '{self.settings.bound_type}'")
 
-        sigma_real_units = band_real_units / self.settings.bound_in_n_sigmas
+    def _sigma(
+            self,
+            variable_values: torch.Tensor
+    ) -> torch.Tensor:
+
+        # sigma(x) = epsilon(x) / kappa, transformed to normalised objective units
+
+        sigma_real_units = self._deviation_bound_real_units(variable_values) / self.settings.bound_in_n_sigmas
 
         return self.proxy_mean.scale_objectives_to_normalised(
             objective_values=sigma_real_units
         )
+
+    def _scaling(
+            self,
+            variable_values: torch.Tensor,
+            **params: Any
+    ) -> torch.Tensor:
+
+        # a(x) = c * sigma(x) / sqrt(k_b(x, x))
+        #   - dividing by the base kernel's diagonal makes it a correlation kernel, so that
+        #     the prior variance is exactly c^2 sigma(x)^2 even for base kernels with
+        #     k_b(x, x) != 1 (e.g. sums of kernels, spectral mixtures)
+
+        base_diagonal = self._evaluate_base_kernel(
+            variable_values, variable_values, diag=True, **params
+        ).clamp(min=1e-12).sqrt()
+
+        return self.amplitude_factor * self._sigma(variable_values) / base_diagonal
 
     def _evaluate_base_kernel(
             self,
@@ -416,19 +444,15 @@ class ProxyScaledKernel(gpytorch.kernels.Kernel):  # type: ignore[misc]
         if params.pop('last_dim_is_batch', False):
             raise NotImplementedError(f"'last_dim_is_batch' is not supported by {self.__class__.__name__}.")
 
+        # k(x, x') = a(x) a(x') k_b(x, x')
+
+        scaling_1 = self._scaling(x1, **params)
+        scaling_2 = self._scaling(x2, **params)
+
         base_values = self._evaluate_base_kernel(x1, x2, diag=diag, **params)
 
-        # Normalising the base kernel by its diagonal so it becomes a correlation kernel
-        #   - Some kernels (e.g. sums of kernels, spectral mixtures) don't have k(x, x) = 1,
-        #     which would silently inflate the prior band beyond the promised bound
-        base_diagonal_1 = self._evaluate_base_kernel(x1, x1, diag=True, **params).clamp(min=1e-12).sqrt()
-        base_diagonal_2 = self._evaluate_base_kernel(x2, x2, diag=True, **params).clamp(min=1e-12).sqrt()
-
-        amplitude_1 = self._amplitude(variable_values=x1) * self.amplitude_factor / base_diagonal_1
-        amplitude_2 = self._amplitude(variable_values=x2) * self.amplitude_factor / base_diagonal_2
-
         if diag:
-            return amplitude_1 * amplitude_2 * base_values
+            return scaling_1 * scaling_2 * base_values
 
         else:
-            return amplitude_1.unsqueeze(-1) * amplitude_2.unsqueeze(-2) * base_values
+            return scaling_1.unsqueeze(-1) * scaling_2.unsqueeze(-2) * base_values
