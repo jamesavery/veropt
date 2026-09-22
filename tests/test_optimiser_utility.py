@@ -3,7 +3,7 @@ import pytest
 import torch
 
 from veropt.optimiser.optimiser_utility import named_values_to_tensor, format_output_for_objective, \
-    get_best_points, get_pareto_optimal_points
+    get_best_points, get_nadir_point, get_pareto_optimal_points
 
 
 def test_get_best_points_simple() -> None:
@@ -312,3 +312,19 @@ def test_format_input_from_objective_with_scalar_floats() -> None:
 
     assert torch.equal(new_variable_values_tensor, expected_variable_tensor)
     assert torch.equal(new_objective_values_tensor, expected_objective_tensor)
+
+
+def test_a_single_pareto_optimal_point_stays_a_point_set() -> None:
+
+    # One dominant point used to come back squeezed to a vector, and the nadir point to a scalar
+
+    variable_values = torch.rand(4, 2)
+    objective_values = torch.tensor([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [0.5, 0.2, 0.1], [-1.0, -1.0, -1.0]])
+
+    pareto_optimal_points = get_pareto_optimal_points(
+        variable_values=variable_values,
+        objective_values=objective_values
+    )
+
+    assert list(pareto_optimal_points['objectives'].shape) == [1, 3]
+    assert list(get_nadir_point(variable_values=variable_values, objective_values=objective_values).shape) == [3]

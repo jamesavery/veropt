@@ -459,7 +459,8 @@ def get_pareto_optimal_points(
             )
             pareto_optimal_booleans[value_index] = True
 
-    pareto_optimal_indices_tensor = pareto_optimal_booleans.nonzero().squeeze()
+    # squeeze(-1) rather than squeeze(): a single Pareto-optimal point must stay a 1-point set
+    pareto_optimal_indices_tensor = pareto_optimal_booleans.nonzero().squeeze(-1)
 
     if sort_by_max_weighted_sum:
 
