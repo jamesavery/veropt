@@ -142,14 +142,16 @@ the wrapped kernel is normalised by its own diagonal, so even base kernels with 
 kernel sums, spectral mixtures — become correlation kernels and the band stays calibrated).
 With the default relative bound,
 `σ(x) = bound_value·|proxy(x)| / bound_in_n_sigmas` — i.e. "1%" is read as a 2σ band by default.
-The scalar amplitude factor `c` is trained by the marginal likelihood but hard-capped at 1 via a
-gpytorch `Interval` constraint, so the band can tighten with data but never exceed the promised
-bound; set `train_amplitude_factor: False` to pin it.
+The scalar amplitude factor `c` is trained by the marginal likelihood but, by default, hard-capped
+at 1 via a gpytorch `Interval` constraint, so the band can tighten with data but never exceed the
+promised bound; set `train_amplitude_factor: False` to pin it, or raise
+`amplitude_factor_upper_bound` when the bound is an assumption rather than a guarantee (below).
 
 Settings (`ProxyPriorSettingsInputDict`): `bound_value` (required), `bound_type`
 (`relative`/`absolute`), `bound_in_n_sigmas` (2.0), `train_amplitude_factor` (True),
-`amplitude_factor_lower_bound` (0.1), `amplitude_floor` (0.0, real units — keeps σ away from zero
-where a relative-bound proxy crosses zero, which otherwise pins the GP and can upset Cholesky).
+`amplitude_factor_lower_bound` (0.1), `amplitude_factor_upper_bound` (1.0), `amplitude_floor`
+(0.0, real units — keeps σ away from zero where a relative-bound proxy crosses zero, which otherwise
+pins the GP and can upset Cholesky), and the three optional settings of the next subsection.
 
 Caveats: the bound is encoded softly (a 2σ Gaussian band, not a hard constraint); the proxy is
 called thousands of times per suggestion step inside dual annealing, so it should cost well under
@@ -158,6 +160,79 @@ acquisition optimisers); normalisation round-trips can hand the proxy points a f
 outside the variable bounds, so proxies with strictly validated domains should clamp their input. Saving/loading works like user-defined objectives: the
 `ProxyMeanFunction` subclass must be importable when the state file is loaded. See
 `examples/example_proxy_informed_prior.py`.
+
+### When the bound is an assumption, and the deviation has known structure near a point
+
+The settings above encode a *certified* bound. Three optional settings cover the other common
+case: the proxy is a cheaper model of the same physics, the search is local around a reference
+point `x0` (say the proxy's own optimum), and what is known about the deviation `d = f − proxy` is
+its low-order structure there rather than a guaranteed width. All default to the behaviour
+described above, and states saved before they existed load unchanged.
+
+- `amplitude_factor_upper_bound` (1.0): the cap on the trained factor `c`. Above 1, training starts
+  from the stated band and the data may widen it as well as tighten it.
+- `reference_point` (real units) with `anchor_at_reference: True`: for objectives defined relative
+  to their own value at `x0`, so that `d(x0) = 0` exactly. The band is conditioned on that,
+  `k(x,x') − k(x,x0)·k(x0,x') / k(x0,x0)`, which is what feeding the model the exact datum
+  `(x0, f(x0))` does. Use one or the other, not both.
+- `local_expansion` (needs `reference_point`): a prior on the deviation's Taylor coefficients at
+  `x0`, added to the band. With `u = x − x0`, `H` the magnitude of the proxy's curvature there
+  (`curvature_metric`: a matrix, or a number `h` for `h·I`; veropt maximises, so a proxy's Hessian
+  at its optimum is negative semi-definite — either sign is accepted, an indefinite matrix is not)
+  and `e(u) = ½·uᵀHu`,
+
+  `k(x,x') = uᵀC u' + β_s²·e(u)e(u') + ¼β_a²·(uᵀH u')²`
+
+  `C` is the covariance of the deviation's gradient at `x0` — `gradient_standard_deviation` (one
+  number, or one per variable; zero where a symmetry forbids a deviation) or a full
+  `gradient_covariance`. `β_s` (`shared_curvature_standard_deviation`) and `β_a`
+  (`general_curvature_standard_deviation`) are dimensionless: the standard deviations of a common
+  rescaling of `H` and of an unstructured symmetric perturbation of it; along any one direction
+  they add in quadrature. The first term is what lets a handful of evaluations locate a *displaced*
+  optimum: it correlates the deviation across the whole domain, where the band alone has to relearn
+  a slope within every lengthscale. These scales are declared assumptions and stay fixed unless
+  `train_amplitude_factor` is set inside `local_expansion`, which fits one common factor within
+  `amplitude_factor_lower_bound`/`_upper_bound` (0.1/10, which must strictly enclose 1). Matrices
+  are plain lists (`.tolist()` an array), so that the settings save as JSON.
+
+With an expansion the band is what remains *after* its low-order terms, so `bound_value` should
+shrink accordingly; it should not vanish, because the expansion has finite rank
+(`n + n(n+1)/2` coefficients) and would otherwise claim certainty everywhere once that many points
+are in. Note that the band contributes gradient (and curvature) uncertainty at `x0` too — for a
+Matérn-5/2 base kernel and a band of constant width, `(5σ²/3)·diag(ℓ⁻²)`; a relative bound whose
+width varies adds `∇σ∇σᵀ` — so the prior's statement about the gradient is the *total*, which
+`ProxyScaledKernel.gradient_covariance_at_reference_real_units()` reports in real units (reach the
+kernel as `optimiser.predictor.model[0].kernel`). The quantity exists only for a base kernel that is
+twice differentiable at zero distance: Matérn ν ≥ 1.5 (ν = 1.5 converges slowly); ν = 0.5, as in
+`rational_quadratic_and_matern`, is refused. The estimate is checked against one at half the step
+and warns if the two disagree. The lengthscale bounds live in normalised variables, and with
+`renormalise_each_step` the variable normaliser follows the evaluated points, so their meaning in
+real units drifts as the points cluster; the diagnostic accounts for the current normalisation.
+
+### Observation noise in real units
+
+The kernels' own `noise` setting is a variance in *normalised* objective units, so its physical
+meaning changes whenever the objective normaliser is refitted. A measured noise level is better
+given as `model={'observation_noise_standard_deviation': 0.05, ...}` (the objective's own units; a
+number, or a list with one entry or `None` per objective). The model converts it at every fit,
+after the kernel's own `noise` and `noise_lower_bound`, which it overrides: if the converted value
+lies below the kernel's lower bound the bound is lowered to admit it, never the other way round.
+It is saved and restored with the state.
+
+- With the kernel's `train_noise` off (the default) the noise is *held* at the measurement.
+- With `train_noise: True` the measurement is a *floor*: it becomes the lower bound of the noise
+  constraint, the fit starts a little above it and may only raise it. A noise fitted freely to tens
+  of points can absorb exactly the shallow curvature a search is after and report a flat surface
+  with wide error bars, so the measurement is not negotiable downwards. On every fit and on reload
+  the value in force is `max(stored or trained value, current floor)`, so a re-measured, larger
+  floor wins over a stale trained value.
+
+Read back what is actually in force with `optimiser.predictor.model[i].observation_noise_real_units()`,
+which returns the effective standard deviation in real units (from the likelihood, not from the
+setting), the floor, and the regime: `'fixed'`, `'at_floor'`, `'trained'`, or `'kernel_setting'`
+when no measurement was given. Note that `predict_values()` passes the model through the
+likelihood, so its band is the predictive one (latent plus noise), whereas the acquisition
+functions use botorch's latent posterior.
 
 ## Normalisation (`normalisation.py`)
 

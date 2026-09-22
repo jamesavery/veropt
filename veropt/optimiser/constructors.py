@@ -47,6 +47,7 @@ class GPytorchModelChoice(TypedDict, total=False):
     training_settings: Optional[GPyTorchTrainingParametersInputDict]
     proxy_prior: Union[ProxyMeanFunction, list[Optional[ProxyMeanFunction]], None]
     proxy_prior_settings: Union[ProxyPriorSettingsInputDict, list[Optional[ProxyPriorSettingsInputDict]], None]
+    observation_noise_standard_deviation: Union[float, list[Optional[float]], None]
 
 
 class AcquisitionChoice(TypedDict, total=False):
@@ -183,6 +184,7 @@ def gpytorch_model(
         proxy_prior_settings: Union[
             ProxyPriorSettingsInputDict, list[Optional[ProxyPriorSettingsInputDict]], None
         ] = None,
+        observation_noise_standard_deviation: Union[float, list[Optional[float]], None] = None,
 ) -> GPyTorchFullModel:
 
     single_model_list = gpytorch_single_model_list(
@@ -198,6 +200,12 @@ def gpytorch_model(
         n_objectives=n_objectives,
         proxy_prior=proxy_prior,
         proxy_prior_settings=proxy_prior_settings
+    )
+
+    _apply_observation_noise(
+        single_model_list=single_model_list,
+        n_objectives=n_objectives,
+        observation_noise_standard_deviation=observation_noise_standard_deviation
     )
 
     model_optimiser = torch_model_optimiser(
@@ -296,6 +304,35 @@ def gpytorch_single_model_list(
         raise ValueError(wrong_kernel_input_message)
 
     return single_model_list
+
+
+def _apply_observation_noise(
+        single_model_list: list[GPyTorchSingleModel],
+        n_objectives: int,
+        observation_noise_standard_deviation: Union[float, list[Optional[float]], None] = None,
+) -> None:
+
+    # The standard deviation of the observation noise in real objective units, per objective
+
+    if observation_noise_standard_deviation is None:
+        return
+
+    if isinstance(observation_noise_standard_deviation, (int, float)):
+        observation_noise_standard_deviation = [observation_noise_standard_deviation] * n_objectives
+
+    elif not isinstance(observation_noise_standard_deviation, list):
+        raise ValueError(
+            "'observation_noise_standard_deviation' must be either None, a number or a list of numbers and None's."
+        )
+
+    assert len(observation_noise_standard_deviation) == n_objectives, (
+        f"Please specify an observation noise (or None) for each objective. "
+        f"Received {n_objectives} objectives but {len(observation_noise_standard_deviation)} noise levels."
+    )
+
+    for model, standard_deviation in zip(single_model_list, observation_noise_standard_deviation):
+        if standard_deviation is not None:
+            model.set_observation_noise_real_units(standard_deviation=standard_deviation)
 
 
 def _apply_proxy_priors(

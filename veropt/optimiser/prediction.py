@@ -151,7 +151,8 @@ class Predictor(SavableClass, metaclass=abc.ABCMeta):
     def update_model_normalisation_functions(
             self,
             unnormaliser_variables: Callable[[torch.Tensor], torch.Tensor],
-            normaliser_objectives: Callable[[torch.Tensor], torch.Tensor]
+            normaliser_objectives: Callable[[torch.Tensor], torch.Tensor],
+            normaliser_variables: Callable[[torch.Tensor], torch.Tensor]
     ) -> None:
 
         # Gives components inside the model (e.g. a proxy prior mean) access to the current
@@ -340,12 +341,14 @@ class BotorchPredictor(Predictor):
     def update_model_normalisation_functions(
             self,
             unnormaliser_variables: Callable[[torch.Tensor], torch.Tensor],
-            normaliser_objectives: Callable[[torch.Tensor], torch.Tensor]
+            normaliser_objectives: Callable[[torch.Tensor], torch.Tensor],
+            normaliser_variables: Callable[[torch.Tensor], torch.Tensor]
     ) -> None:
 
         self.model.update_normalisation_functions(
             unnormaliser_variables=unnormaliser_variables,
-            normaliser_objectives=normaliser_objectives
+            normaliser_objectives=normaliser_objectives,
+            normaliser_variables=normaliser_variables
         )
 
     def gather_dicts_to_save(self) -> dict:

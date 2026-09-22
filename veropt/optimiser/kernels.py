@@ -561,8 +561,9 @@ class RationalQuadraticMaternKernel(GPyTorchSingleModel):
             list(self.model_with_data.mean_module.parameters()),
             list(self.data_model_base_covar_module.kernels[0].base_kernel.parameters()),
             list(self.data_model_base_covar_module.kernels[1].base_kernel.parameters()),
-            # The proxy prior's amplitude factor, if there is one
-            list(self.model_with_data.covar_module.parameters(recurse=False))
+            # The proxy prior's amplitude factors, if there are any: the band's own and, in a
+            # submodule, the local expansion's
+            self._proxy_prior_parameters()
         ]
 
         self.trained_parameters = filter_out_empty_parameter_groups(

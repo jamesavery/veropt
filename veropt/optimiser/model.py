@@ -1,10 +1,11 @@
 import abc
 import functools
+import math
 import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Iterator, Mapping, Optional, Self, Sequence, TypedDict, Unpack
+from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Self, Sequence, TypedDict, Unpack
 
 import botorch
 import gpytorch
@@ -103,6 +104,12 @@ def format_json_state_dict(
     return formatted_dict
 
 
+class ObservationNoiseInformation(TypedDict):
+    standard_deviation: float  # in force, real objective units
+    floor: Optional[float]  # the declared measurement, real units, if any
+    regime: Literal['kernel_setting', 'fixed', 'at_floor', 'trained']
+
+
 class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
 
     name: str = 'meta'
@@ -129,6 +136,12 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
         self.train_noise = train_noise
 
         self.proxy_prior: Optional[ProxyPrior] = None
+
+        # Standard deviation of the observation noise in real objective units (None: the kernel's
+        # own 'noise' setting, which is a variance in normalised units, applies instead)
+        self.observation_noise_standard_deviation: Optional[float] = None
+
+        self._normaliser_objectives: Optional[NormalisationFunction] = None
 
         assert 'name' in self.__class__.__dict__, (
             f"Must give subclass '{self.__class__.__name__}' the static class variable 'name'."
@@ -174,6 +187,11 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
                 proxy_prior=ProxyPrior.from_saved_state(
                     saved_state=saved_state['proxy_prior']['state']
                 )
+            )
+
+        if saved_state.get('observation_noise_standard_deviation') is not None:
+            model.set_observation_noise_real_units(
+                standard_deviation=saved_state['observation_noise_standard_deviation']
             )
 
         if len(saved_state['state_dict']) > 0:
@@ -232,6 +250,103 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
             settings=proxy_prior.settings
         )
 
+    def set_observation_noise_real_units(
+            self,
+            standard_deviation: float
+    ) -> None:
+
+        # A measured noise level is a physical quantity, so it is stated in the objective's own
+        # units and converted here. The conversion is redone at every fit because the objective
+        # normalisation, and with it the meaning of a normalised noise level, changes with the data.
+        #   - With 'train_noise' off the noise is held at the measurement. With it on, the
+        #     measurement is a floor the fit may only raise: a noise fitted to tens of points can
+        #     absorb the very curvature being sought, so the measurement is not negotiable below.
+
+        assert isinstance(standard_deviation, (int, float)) and math.isfinite(standard_deviation), (
+            "'observation_noise_standard_deviation' must be a finite number."
+        )
+        assert standard_deviation > 0.0, "'observation_noise_standard_deviation' must be positive."
+
+        self.observation_noise_standard_deviation = float(standard_deviation)
+
+        self._apply_observation_noise_real_units()
+
+    def _objective_scale(self) -> Optional[float]:
+
+        # The scale of the objective normalisation, i.e. the factor a deviation is multiplied by
+
+        if self._normaliser_objectives is None:
+            return None
+
+        with torch.no_grad():
+            return float(self._normaliser_objectives(torch.ones(())) - self._normaliser_objectives(torch.zeros(())))
+
+    def _apply_observation_noise_real_units(self) -> None:
+
+        objective_scale = self._objective_scale()
+
+        if self.observation_noise_standard_deviation is None or objective_scale is None or self.model_with_data is None:
+            return
+
+        floor = (self.observation_noise_standard_deviation * objective_scale) ** 2
+
+        if self.train_noise:
+            # The measurement becomes the constraint's lower bound; a value in force above it
+            # (a trained one) stays
+            previous_noise = float(self.likelihood.noise.detach())
+            self.set_noise_constraint(lower_bound=floor)
+            self.set_noise(noise=max(previous_noise, floor))
+
+        else:
+            # The constraint exists as numerical jitter, not as physics, so it yields to the
+            # measurement rather than clamping it
+            if floor < float(self.likelihood.noise_covar.raw_noise_constraint.lower_bound):
+                self.set_noise_constraint(lower_bound=0.5 * floor)
+            self.set_noise(noise=floor)
+
+    def observation_noise_real_units(self) -> ObservationNoiseInformation:
+
+        # The noise actually in force, read from the likelihood and converted back to real units,
+        # so that a value the model silently changed would show here
+
+        assert self.model_with_data is not None, "Model must be initialised to use this function."
+
+        objective_scale = self._objective_scale()
+
+        assert objective_scale is not None, "The model's normalisation functions must be set to report the noise."
+
+        standard_deviation = math.sqrt(float(self.likelihood.noise.detach())) / objective_scale
+        floor = self.observation_noise_standard_deviation
+
+        regime: Literal['kernel_setting', 'fixed', 'at_floor', 'trained']
+
+        if floor is None:
+            regime = 'kernel_setting'
+        elif not self.train_noise:
+            regime = 'fixed'
+        elif standard_deviation <= floor * (1.0 + 2.0 * self.trained_noise_start_margin):
+            regime = 'at_floor'
+        else:
+            regime = 'trained'
+
+        return {'standard_deviation': standard_deviation, 'floor': floor, 'regime': regime}
+
+    def _proxy_prior_parameters(self) -> list[torch.nn.Parameter]:
+
+        # The proxy prior wrapper's own trainable parameters (its amplitude factors, not the base
+        # kernel's), for kernel classes that pick their trained parameters by hand
+
+        assert self.model_with_data is not None, "Model must be initialised to use this function."
+
+        covar_module = self.model_with_data.covar_module
+
+        if not isinstance(covar_module, ProxyScaledKernel):
+            return []
+
+        base_kernel_parameters = {id(parameter) for parameter in covar_module.base_kernel.parameters()}
+
+        return [parameter for parameter in covar_module.parameters() if id(parameter) not in base_kernel_parameters]
+
     @property
     def data_model_base_covar_module(self) -> gpytorch.Module:
 
@@ -251,14 +366,24 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
     def update_normalisation_functions(
             self,
             unnormaliser_variables: NormalisationFunction,
-            normaliser_objectives: NormalisationFunction
+            normaliser_objectives: NormalisationFunction,
+            normaliser_variables: Optional[NormalisationFunction] = None
     ) -> None:
+
+        # The normaliser of the variables is only needed by proxy prior components that are
+        # specified at a point given in real units (anchoring, the local expansion)
+
+        self._normaliser_objectives = normaliser_objectives
+
+        if self.model_with_data is not None:
+            self._apply_observation_noise_real_units()
 
         if isinstance(self.mean_module, ProxyMean):
 
             self.mean_module.update_normalisation_functions(
                 unnormaliser_variables=unnormaliser_variables,
-                normaliser_objectives=normaliser_objectives
+                normaliser_objectives=normaliser_objectives,
+                normaliser_variables=normaliser_variables
             )
 
     @abc.abstractmethod
@@ -282,6 +407,9 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
         self._set_up_trained_parameters()
 
         self._set_up_model_constraints()
+
+        # After the constraints, which set the kernel's own (normalised) noise level
+        self._apply_observation_noise_real_units()
 
     def initialise_model_from_state_dict(
             self,
@@ -319,7 +447,8 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
                 'train_targets': train_targets,
                 'n_variables': self.n_variables,
                 'settings': self.get_settings().gather_dicts_to_save(),
-                'proxy_prior': self.proxy_prior.gather_dicts_to_save() if self.proxy_prior is not None else None
+                'proxy_prior': self.proxy_prior.gather_dicts_to_save() if self.proxy_prior is not None else None,
+                'observation_noise_standard_deviation': self.observation_noise_standard_deviation
             }
         }
 
@@ -340,6 +469,10 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
             module=self.likelihood.noise_covar
         )
 
+    # A trained noise starting exactly on its lower bound has an infinite raw value and no
+    # gradient, so it starts this far above the bound instead (relative)
+    trained_noise_start_margin = 0.01
+
     def set_noise(
             self,
             noise: float
@@ -347,8 +480,13 @@ class GPyTorchSingleModel(SavableClass, metaclass=abc.ABCMeta):
 
         assert self.model_with_data is not None, "Model must be initiated to call this function"
 
-        if noise < self.likelihood.noise_covar.raw_noise_constraint.lower_bound:
-            noise = float(self.likelihood.noise_covar.raw_noise_constraint.lower_bound)
+        lower_bound = float(self.likelihood.noise_covar.raw_noise_constraint.lower_bound)
+
+        if noise < lower_bound:
+            noise = lower_bound
+
+        if self.train_noise and noise <= lower_bound:
+            noise = lower_bound * (1.0 + self.trained_noise_start_margin) if lower_bound > 0.0 else 1e-12
 
         self.model_with_data.likelihood.noise = torch.tensor(noise)
 
@@ -829,7 +967,8 @@ class GPyTorchFullModel(SurrogateModel, SavableClass):
     def update_normalisation_functions(
             self,
             unnormaliser_variables: NormalisationFunction,
-            normaliser_objectives: NormalisationFunction
+            normaliser_objectives: NormalisationFunction,
+            normaliser_variables: NormalisationFunction
     ) -> None:
 
         for objective_no, model in enumerate(self._model_list):
@@ -840,7 +979,8 @@ class GPyTorchFullModel(SurrogateModel, SavableClass):
                     normaliser_objectives=normaliser_objectives,
                     objective_index=objective_no,
                     n_objectives=self.n_objectives
-                )
+                ),
+                normaliser_variables=normaliser_variables
             )
 
     @property

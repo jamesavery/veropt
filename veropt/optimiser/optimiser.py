@@ -537,9 +537,10 @@ class BayesianOptimiser(SavableClass):
                 variable_values: torch.Tensor,
         ) -> torch.Tensor:
 
-            assert self._normaliser_variables is not None, "Must have made normalisers to call this"
-
             if self.return_normalised_data:
+
+                assert self._normaliser_variables is not None, "Must have made normalisers to call this"
+
                 variable_values = self._normaliser_variables.transform(variable_values)
 
             return variable_values
@@ -552,9 +553,10 @@ class BayesianOptimiser(SavableClass):
                 objective_values: torch.Tensor,
         ) -> torch.Tensor:
 
-            assert self._normaliser_objectives is not None, "Must have made normalisers to call this"
-
             if self.return_normalised_data:
+
+                assert self._normaliser_objectives is not None, "Must have made normalisers to call this"
+
                 objective_values = self._normaliser_objectives.inverse_transform(objective_values)
 
             return objective_values
@@ -793,7 +795,8 @@ class BayesianOptimiser(SavableClass):
         #   - The closures read the current normalisers at call time, so they survive refits
         self.predictor.update_model_normalisation_functions(
             unnormaliser_variables=self.get_unnormaliser_function_variables(),
-            normaliser_objectives=self.get_normaliser_function_objectives()
+            normaliser_objectives=self.get_normaliser_function_objectives(),
+            normaliser_variables=self.get_normaliser_function_variables()
         )
 
         self.predictor.update_with_new_data(
