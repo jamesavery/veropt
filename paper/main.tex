@@ -251,7 +251,7 @@ in \eqref{eq:prior} a hyperparameter, trained alongside the kernel
 lengthscales by type-II maximum likelihood, but constrained to
 \begin{equation}
   \label{eq:cap}
-  c \in (c_{\min}, \, 1],
+  c \in (c_{\min}, \, c_{\max}], \qquad c_{\max} = 1,
 \end{equation}
 implemented by a sigmoidal reparametrisation (a \texttt{gpytorch}
 \citep{gardner2018} interval constraint). The cap at $1$ guarantees that no
@@ -352,7 +352,7 @@ Table~\ref{tab:mathtocode} maps each equation to the code that realises it.
     scale-only transform & \eqref{eq:sigmanorm} & \code{scale\_objectives\_to\_normalised} \\
     correlation $\rho$ & \eqref{eq:corr} & \code{ProxyScaledKernel.\_scaling} \\
     full kernel $k$ & \eqref{eq:prior} & \code{ProxyScaledKernel.forward} \\
-    amplitude cap $c \in (c_{\min}, 1]$ & \eqref{eq:cap} & \code{Interval} on \code{raw\_amplitude\_factor} \\
+    amplitude cap $c \in (c_{\min}, c_{\max}]$ & \eqref{eq:cap} & \code{Interval} on \code{raw\_amplitude\_factor} \\
     late-bound $T_x^{-1}, T_y$ & \S\ref{sec:normalisation} & closure getters in \code{optimiser.py} \\
     \bottomrule
   \end{tabular}
@@ -397,9 +397,11 @@ rather than deep inside a Cholesky factorisation. A concrete subclass appears
 in the example of Section~\ref{sec:example}.
 
 \paragraph{The prior mean: \code{ProxyMean}.} A \code{gpytorch.means.Mean}
-that implements \eqref{eq:meannorm}. It holds the user's proxy and two
+that implements \eqref{eq:meannorm}. It holds the user's proxy and three
 initially unset normalisation closures, installed later by
-\code{update\_normalisation\_functions}:
+\code{update\_normalisation\_functions} (the third, the forward map of the
+variables, serves optional extensions of the prior that this paper does not
+use, and is not needed here):
 
 \begin{lstlisting}
 class ProxyMean(gpytorch.means.Mean):
@@ -409,6 +411,7 @@ class ProxyMean(gpytorch.means.Mean):
         self.mean_function = mean_function
         self._unnormaliser_variables = None   # x-tilde -> x
         self._normaliser_objectives = None    # y -> y-tilde
+        self._normaliser_variables = None     # x -> x-tilde (extensions)
 
     def evaluate_proxy_real_units(self, variable_values):
         # g(T_x^{-1}(x)): unnormalise the query points, evaluate
@@ -475,10 +478,14 @@ as
 \end{equation*}
 the \code{forward} is nothing but this equation --- the outer product of the
 vector $a$ with itself, times the base kernel matrix --- with everything else
-delegated to named helpers:
+delegated to named helpers. Two optional terms follow it, both off by
+default and both unused in this paper: the band conditioned on a zero
+deviation at a reference point, and a polynomial kernel on the deviation's
+Taylor coefficients there (the \code{local\_expansion} of
+\code{docs/optimiser.md}).
 
 \begin{lstlisting}
-class ProxyScaledKernel(gpytorch.kernels.Kernel):
+class ProxyScaledKernel(_AmplitudeFactor, gpytorch.kernels.Kernel):
 
     has_lengthscale = False
 
@@ -487,14 +494,25 @@ class ProxyScaledKernel(gpytorch.kernels.Kernel):
         scaling_1 = self._scaling(x1, **params)
         scaling_2 = self._scaling(x2, **params)
 
-        base_values = self._evaluate_base_kernel(
-            x1, x2, diag=diag, **params)
+        values = self._outer(scaling_1, scaling_2, diag) \
+            * self._evaluate_base_kernel(x1, x2, diag=diag, **params)
 
+        if self.settings.anchor_at_reference:      # optional, off here
+            values = values - self._anchoring_correction(
+                x1, x2, scaling_1, scaling_2, diag=diag, **params)
+
+        if self.local_expansion is not None:       # optional, off here
+            values = values + self.local_expansion.forward(
+                x1, x2, diag=diag)
+
+        return values
+
+    @staticmethod
+    def _outer(values_1, values_2, diag):
         if diag:
-            return scaling_1 * scaling_2 * base_values
+            return values_1 * values_2
         else:
-            return scaling_1.unsqueeze(-1) \
-                * scaling_2.unsqueeze(-2) * base_values
+            return values_1.unsqueeze(-1) * values_2.unsqueeze(-2)
 \end{lstlisting}
 
 The scaling $a(x)$ divides by the base kernel's own diagonal --- the
@@ -560,33 +578,57 @@ amplitude factor $c$.
 \paragraph{The amplitude cap.} The constraint \eqref{eq:cap} uses
 \code{gpytorch}'s standard reparametrisation machinery: the raw parameter is
 unconstrained, and an \code{Interval} constraint maps it through a scaled
-sigmoid into $(c_{\min}, 1]$. Gradient training can therefore push $c$
-towards the cap but never across it.
+sigmoid into $(c_{\min}, c_{\max}]$. Gradient training can therefore push $c$
+towards the cap but never across it. The registration lives in a small
+helper shared by the package's proxy-prior kernels; the kernel calls it with
+the cap $c_{\max} = 1$ of \eqref{eq:cap} by default
+(\code{amplitude\_factor\_upper\_bound}, Table~\ref{tab:settings}):
 
 \begin{lstlisting}
-        if settings.train_amplitude_factor:
-            self.register_parameter(
-                name='raw_amplitude_factor',
-                parameter=torch.nn.Parameter(torch.zeros(())))
+class _AmplitudeFactor:
+    # A scalar factor on a kernel, fixed at 1 or trained within an
+    # interval
 
-            # The deviation bound is an upper bound: the amplitude may
-            # shrink with training but can never exceed the bound.
-            self.register_constraint(
-                param_name='raw_amplitude_factor',
-                constraint=Interval(
-                    lower_bound=settings.amplitude_factor_lower_bound,
-                    upper_bound=1.0))
+    def _register_amplitude_factor(self, train, lower_bound,
+                                   upper_bound, initial_value):
+        self._amplitude_factor_is_trained = train
+        if not train:
+            return
 
-            # The sigmoidal transform is infinite at the boundary, so
-            # initialise just inside the cap.
-            self.amplitude_factor = torch.tensor(0.99)
+        self.register_parameter(
+            name='raw_amplitude_factor',
+            parameter=torch.nn.Parameter(torch.zeros(())))
+        self.register_constraint(
+            param_name='raw_amplitude_factor',
+            constraint=Interval(lower_bound=lower_bound,
+                                upper_bound=upper_bound))
+
+        # The constraint transform is infinite on the bounds themselves
+        # (zero gradient, 'inf' in the saved state), so the start is
+        # kept inside the interval
+        margin = 0.01 * (upper_bound - lower_bound)
+        self.amplitude_factor = min(
+            max(initial_value, lower_bound + margin), upper_bound - margin)
+\end{lstlisting}
+
+\begin{lstlisting}
+        # In ProxyScaledKernel.__init__: the deviation bound is an upper
+        # bound on the band, so with the default cap of 1 the amplitude
+        # may shrink with training but never exceed the bound
+        self._register_amplitude_factor(
+            train=settings.train_amplitude_factor,
+            lower_bound=settings.amplitude_factor_lower_bound,
+            upper_bound=settings.amplitude_factor_upper_bound,
+            initial_value=0.99
+                if settings.amplitude_factor_upper_bound == 1.0 else 1.0)
 \end{lstlisting}
 
 With \code{train\_amplitude\_factor} off, the parameter is never registered
 and the \code{amplitude\_factor} property returns the constant $1$: the
-literal worst-case prior. The initialisation at $0.99$ rather than $1.0$ is
-forced by the reparametrisation: the inverse sigmoid is infinite at the
-boundary.
+literal worst-case prior. The initialisation at $0.99$ rather than $1.0$
+under the hard cap is forced by the reparametrisation: the inverse sigmoid is
+infinite at the boundary, and the helper keeps every start inside its
+interval for the same reason.
 
 \paragraph{Settings.} All options travel in a small dataclass,
 \code{ProxyPriorSettings}, validated from the user-facing typed dictionary
@@ -675,7 +717,7 @@ The closure reads \code{self.\_normaliser\_variables} at \emph{call} time,
 so a normaliser refit is picked up automatically; and if normalisation is
 disabled entirely (\code{normalise=False}), the guard makes the closure the
 identity and the whole construction transparently operates in physical
-units. The pair of closures is injected at the top of the optimiser's
+units. The closures are injected at the top of the optimiser's
 predictor update --- before training, because training is the first thing
 that evaluates the mean:
 
@@ -688,7 +730,9 @@ that evaluates the mean:
             unnormaliser_variables=
                 self.get_unnormaliser_function_variables(),
             normaliser_objectives=
-                self.get_normaliser_function_objectives())
+                self.get_normaliser_function_objectives(),
+            normaliser_variables=
+                self.get_normaliser_function_variables())
 
         self.predictor.update_with_new_data(
             variable_values=self.evaluated_variable_values.tensor,
@@ -812,6 +856,9 @@ settings.
       train $c$ by marginal likelihood; else $c \equiv 1$ \\
     \code{amplitude\_factor\_lower\_bound} & \code{0.1} &
       $c_{\min}$ in \eqref{eq:cap} \\
+    \code{amplitude\_factor\_upper\_bound} & \code{1.0} &
+      $c_{\max}$ in \eqref{eq:cap}; $1$ is the hard cap of a certified
+      bound, larger values let the data widen an assumed one \\
     \code{amplitude\_floor} & \code{0.0} &
       $\varepsilon_{\mathrm{floor}}$, physical units; keeps $\sigma > 0$
       where $g \approx 0$ \\
