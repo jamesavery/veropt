@@ -2,9 +2,12 @@ import csv
 import tempfile
 from pathlib import Path
 
+import pytest
+import torch
+
 from veropt.optimiser.constructors import bayesian_optimiser
-from veropt.optimiser.practice_objectives import VehicleSafety
-from veropt.graphical.visualisation import save_table_to_csv
+from veropt.optimiser.practice_objectives import Hartmann, VehicleSafety
+from veropt.graphical.visualisation import plot_prediction_surface_grid, save_table_to_csv
 
 
 def test_save_table_to_csv() -> None:
@@ -70,3 +73,30 @@ def test_save_table_to_csv() -> None:
                 f"Objective '{obj_name}' at point {point_idx}: "
                 f"expected {expected_value}, got {csv_value}"
             )
+
+
+@pytest.mark.parametrize('included_variables', [None, [0, 2, 3], ['var_1', 'var_3', 'var_4']])
+def test_plot_prediction_surface_grid_accepts_every_way_of_selecting_variables(
+        included_variables: list  # type: ignore[type-arg]
+) -> None:
+
+    # A selection by index used to leave the number of plotted variables unbound
+
+    torch.manual_seed(0)
+
+    optimiser = bayesian_optimiser(
+        n_initial_points=4,
+        n_bayesian_points=0,
+        n_evaluations_per_step=4,
+        objective=Hartmann(n_variables=4),
+        verbose=False,
+        model={'training_settings': {'max_iter': 10}},
+        n_points_before_fitting=4
+    )
+    optimiser.run_optimisation_step()
+
+    figure = plot_prediction_surface_grid(
+        optimiser, objective=0, included_variables=included_variables, n_points_per_dimension=8
+    )
+
+    assert any(trace.type == 'surface' for trace in figure.data)

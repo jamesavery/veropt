@@ -590,8 +590,7 @@ def plot_prediction_surface_grid(
                 "'included_variables'."
             )
 
-        n_plotted_variables = optimiser.objective.n_variables
-        included_variables = list(range(n_plotted_variables))
+        included_variables = list(range(optimiser.objective.n_variables))
 
     if isinstance(included_variables[0], int):
         _included_variables: list[str] = [
@@ -601,7 +600,8 @@ def plot_prediction_surface_grid(
 
     else:
         _included_variables = included_variables  # type: ignore[assignment]  # Checked for other two options
-        n_plotted_variables = len(_included_variables)
+
+    n_plotted_variables = len(_included_variables)
 
     if evaluated_point is None:
 
