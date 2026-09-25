@@ -270,6 +270,23 @@ class ProxyPrior(SavableClass):
             settings=ProxyPriorSettings(**_with_local_expansion_settings(settings))
         )
 
+    def deviation_standard_deviation_real_units(
+            self,
+            variable_values: torch.Tensor
+    ) -> torch.Tensor:
+
+        # sigma(x) = epsilon(x) / kappa in real units, from the settings and the proxy alone, so it
+        # is available before any normaliser exists (it is what the objectives are normalised by
+        # when there are too few points to do it from data)
+
+        if self.settings.bound_type == 'relative':
+            deviation_bound = _relative_deviation_bound(self.settings, self.mean_function(variable_values))
+
+        else:
+            deviation_bound = torch.full(variable_values.shape[:-1], self.settings.bound_value)
+
+        return deviation_bound / self.settings.bound_in_n_sigmas
+
     def gather_dicts_to_save(self) -> dict:
         return {
             'name': self.name,
@@ -299,6 +316,16 @@ class ProxyPrior(SavableClass):
             mean_function=mean_function,
             settings=settings
         )
+
+
+def _relative_deviation_bound(
+        settings: ProxyPriorSettings,
+        proxy_values: torch.Tensor
+) -> torch.Tensor:
+
+    # epsilon(x) = bound * |g(x)|, kept away from zero by the floor
+
+    return (settings.bound_value * proxy_values.abs()).clamp(min=settings.amplitude_floor)
 
 
 def _is_list_of_numbers(value: Any) -> bool:
@@ -792,12 +819,8 @@ class ProxyScaledKernel(_AmplitudeFactor, gpytorch.kernels.Kernel):  # type: ign
 
         if self.settings.bound_type == 'relative':
 
-            proxy_values = self.proxy_mean.evaluate_proxy_real_units(
-                variable_values=variable_values
-            )
-
-            return (self.settings.bound_value * proxy_values.abs()).clamp(
-                min=self.settings.amplitude_floor
+            return _relative_deviation_bound(
+                self.settings, self.proxy_mean.evaluate_proxy_real_units(variable_values=variable_values)
             )
 
         elif self.settings.bound_type == 'absolute':

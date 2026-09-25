@@ -237,8 +237,9 @@ class BayesianOptimiser(SavableClass):
                 "Normalisers for variables and objectives must be of the same class."
             )
 
+        # An empty set of initial points loses its variable dimension in the JSON round trip
         initial_points_real_units = TensorWithNormalisationFlag(
-            tensor=torch.tensor(saved_state['initial_points']['values']),
+            tensor=torch.tensor(saved_state['initial_points']['values']).reshape(-1, objective.n_variables),
             normalised=saved_state['initial_points']['normalised'],
         )
 
@@ -452,6 +453,12 @@ class BayesianOptimiser(SavableClass):
 
         elif self.optimisation_mode == OptimisationMode.bayesian:
 
+            assert self.model_has_been_trained, (
+                "There is no trained model to suggest points from. With no initial points, add points evaluated "
+                "elsewhere with 'add_evaluated_points_real_units' before the first step, and set "
+                "'n_points_before_fitting' no higher than their number."
+            )
+
             suggested_variables_tensor = self.predictor.suggest_points(
                 verbose=self.settings.verbose
             )
@@ -638,6 +645,25 @@ class BayesianOptimiser(SavableClass):
             )
         )
 
+    def add_evaluated_points_real_units(
+            self,
+            variable_values: torch.Tensor,
+            objective_values: torch.Tensor
+    ) -> None:
+
+        # Points evaluated outside the optimiser (a known reference, an earlier campaign), shapes
+        # [n_points, n_variables] and [n_points, n_objectives] in real units. They count towards
+        # the initial points, and the model is fitted as soon as 'n_points_before_fitting' points
+        # are in -- from a single point if every objective has a proxy prior, whose declared scale
+        # then normalises the objectives (see '_fit_normaliser').
+
+        self._append_points(
+            variable_values_flagged=TensorWithNormalisationFlag(tensor=variable_values, normalised=False),
+            objective_values_flagged=TensorWithNormalisationFlag(tensor=objective_values, normalised=False)
+        )
+
+        self._train_and_normalise_if_needed()
+
     @_check_input_dimensions
     def _add_new_points(
             self,
@@ -645,9 +671,6 @@ class BayesianOptimiser(SavableClass):
             variable_values_flagged: TensorWithNormalisationFlag,
             objective_values_flagged: TensorWithNormalisationFlag
     ) -> None:
-
-        assert variable_values_flagged.normalised is False
-        assert objective_values_flagged.normalised is False
 
         if len(variable_values_flagged.tensor) == 0 and len(objective_values_flagged.tensor) == 0:
             pass
@@ -663,6 +686,27 @@ class BayesianOptimiser(SavableClass):
             #   - Current step might be the main issue?
             assert variable_values_flagged.tensor.shape[DataShape.index_points] == self.n_evaluations_per_step
             assert objective_values_flagged.tensor.shape[DataShape.index_points] == self.n_evaluations_per_step
+
+            self._append_points(
+                variable_values_flagged=variable_values_flagged,
+                objective_values_flagged=objective_values_flagged
+            )
+
+    @_check_input_dimensions
+    def _append_points(
+            self,
+            *,
+            variable_values_flagged: TensorWithNormalisationFlag,
+            objective_values_flagged: TensorWithNormalisationFlag
+    ) -> None:
+
+        assert variable_values_flagged.normalised is False
+        assert objective_values_flagged.normalised is False
+
+        if len(variable_values_flagged.tensor) == 0:
+            pass
+
+        else:
 
             if self.n_points_evaluated == 0:
 
@@ -750,7 +794,8 @@ class BayesianOptimiser(SavableClass):
 
     def _verify_set_up(self) -> None:
 
-        assert self.n_initial_points > 0, "The number of initial points should be greater than 0."
+        # Zero initial points is allowed: the points then come from 'add_evaluated_points_real_units'
+        assert self.n_initial_points >= 0, "The number of initial points cannot be negative."
 
         assert self.n_initial_points % self.n_evaluations_per_step == 0, (
             "The amount of initial points is not divisable by the amount of points evaluated each step."
@@ -812,13 +857,26 @@ class BayesianOptimiser(SavableClass):
 
     def _fit_normaliser(self) -> None:
 
-        self._normaliser_variables = self.normaliser_class.from_tensor(
-            tensor=self.evaluated_variables_real_units
-        )
+        # Fewer than two points have no spread to normalise from. Then the variables are normalised
+        # from the bounds and the objectives from the scale the proxy prior declares, which is what
+        # lets a run start from a single known point.
+        too_few_points = self.n_points_evaluated < 2
 
-        self._normaliser_objectives = self.normaliser_class.from_tensor(
-            tensor=self.evaluated_objectives_real_units
-        )
+        if self.settings.variable_normalisation == 'bounds' or too_few_points:
+            self._normaliser_variables = self._normaliser_variables_from_bounds()
+
+        else:
+            self._normaliser_variables = self.normaliser_class.from_tensor(
+                tensor=self.evaluated_variables_real_units
+            )
+
+        if too_few_points:
+            self._normaliser_objectives = self._normaliser_objectives_from_prior()
+
+        else:
+            self._normaliser_objectives = self.normaliser_class.from_tensor(
+                tensor=self.evaluated_objectives_real_units
+            )
 
         self._update_normalised_values()
 
@@ -826,6 +884,41 @@ class BayesianOptimiser(SavableClass):
 
             best_value_string = list_with_floats_to_string(self.get_best_points()['objectives'].tolist())
             print(f"Normalisation has been completed. Best values changed to: {best_value_string} \n")
+
+    def _normaliser_variables_from_bounds(self) -> Normaliser:
+
+        # The moments of points filling the bounds uniformly: a data-fitted normaliser on such
+        # points would agree, but this one does not move as the evaluated points cluster
+
+        lower_bounds, upper_bounds = self._bounds_real_units[0], self._bounds_real_units[1]
+
+        return self.normaliser_class.from_moments(
+            means=(lower_bounds + upper_bounds) / 2.0,
+            variances=(upper_bounds - lower_bounds) ** 2 / 12.0
+        )
+
+    def _normaliser_objectives_from_prior(self) -> Normaliser:
+
+        scales = self.predictor.prior_objective_scales_real_units(
+            variable_values=self.evaluated_variables_real_units
+        )
+
+        assert scales is not None, (
+            f"Fitting the model from {self.n_points_evaluated} point(s) needs a proxy prior on every objective, "
+            f"which declares the objective's scale. Otherwise set 'n_points_before_fitting' to at least 2."
+        )
+
+        variances = (scales ** 2).mean(dim=DataShape.index_points)
+
+        assert bool((variances > 0.0).all()), (
+            "The proxy prior's deviation band is zero at the evaluated point(s), so it gives no scale to normalise "
+            "the objectives by. Use an absolute bound or an 'amplitude_floor', or evaluate at least 2 points."
+        )
+
+        return self.normaliser_class.from_moments(
+            means=self.evaluated_objectives_real_units.mean(dim=DataShape.index_points),
+            variances=variances
+        )
 
     def _update_normalised_values(self) -> None:
 

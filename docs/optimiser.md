@@ -14,7 +14,7 @@ TypedDict** (string options + settings dicts, validated against `Literal` types)
 | `acquisition_function` | `AcquisitionChoice` | `qlogehvi` (multi-objective default), `ucb` (single-objective default, setting `beta`) |
 | `acquisition_optimiser` | `AcquisitionOptimiserChoice` | `dual_annealing` (setting `max_iter`); `allow_proximity_punishment` (default on when `n_evaluations_per_step > 1`) with `proximity_punish_settings` (`alpha`, `omega`, `refresh_setting`) |
 | `normaliser` | `NormaliserChoice` | `zero_mean_unit_variance` |
-| `**kwargs` | `OptimiserSettingsInputDict` | `normalise` (True), `verbose` (True), `renormalise_each_step` (None → True iff multi-objective), `n_points_before_fitting`, `objective_weights`, `initial_points_generator` (`random`) |
+| `**kwargs` | `OptimiserSettingsInputDict` | `normalise` (True), `verbose` (True), `renormalise_each_step` (None → True iff multi-objective), `n_points_before_fitting`, `objective_weights`, `initial_points_generator` (`random`), `variable_normalisation` (`data`; `bounds` normalises the variables by the bounds' moments, so lengthscale bounds keep their real-unit meaning as points cluster) |
 
 Internally it builds a `BotorchPredictor` via `botorch_predictor()` and calls
 `BayesianOptimiser.from_the_beginning()`.
@@ -208,6 +208,17 @@ twice differentiable at zero distance: Matérn ν ≥ 1.5 (ν = 1.5 converges sl
 and warns if the two disagree. The lengthscale bounds live in normalised variables, and with
 `renormalise_each_step` the variable normaliser follows the evaluated points, so their meaning in
 real units drifts as the points cluster; the diagnostic accounts for the current normalisation.
+
+### Starting from known points
+
+Points evaluated outside the optimiser go in with
+`optimiser.add_evaluated_points_real_units(variable_values, objective_values)` (real units, any
+number of points). They count as initial points, so `n_initial_points=0` is allowed, and the model
+is fitted as soon as `n_points_before_fitting` points are in. With a proxy prior on every
+objective that can be a *single* point: fewer than two points have no spread to normalise from,
+so the variables are then normalised from the bounds and the objectives from the scale the prior
+declares at the evaluated points (σ = bound/κ), and the model is the prior conditioned on the
+point. Without a proxy prior, at least two points are needed and the optimiser says so.
 
 ### Observation noise in real units
 

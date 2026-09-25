@@ -148,6 +148,15 @@ class Predictor(SavableClass, metaclass=abc.ABCMeta):
         self._normaliser_variables = normaliser_variables
         self._unnormaliser_objectives = unnormaliser_objectives
 
+    def prior_objective_scales_real_units(
+            self,
+            variable_values: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+
+        # The scale each objective's prior declares at the given points (real units), when the
+        # model has one for every objective; lets the optimiser normalise before it has data
+        return None
+
     def update_model_normalisation_functions(
             self,
             unnormaliser_variables: Callable[[torch.Tensor], torch.Tensor],
@@ -337,6 +346,13 @@ class BotorchPredictor(Predictor):
         self.acquisition_optimiser.update_bounds(
             new_bounds=new_bounds
         )
+
+    def prior_objective_scales_real_units(
+            self,
+            variable_values: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+
+        return self.model.prior_objective_scales_real_units(variable_values=variable_values)
 
     def update_model_normalisation_functions(
             self,

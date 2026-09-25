@@ -21,6 +21,18 @@ class Normaliser(SavableClass, metaclass=abc.ABCMeta):
 
         pass
 
+    @classmethod
+    @abc.abstractmethod
+    def from_moments(
+            cls,
+            means: torch.Tensor,
+            variances: torch.Tensor
+    ) -> Self:
+
+        # From declared moments rather than data: the bounds, or a prior's scale
+
+        pass
+
     @abc.abstractmethod
     def transform(
             self,
@@ -49,6 +61,18 @@ class NormaliserZeroMeanUnitVariance(Normaliser):
     ):
         self.means = means
         self.variances = variances
+
+    @classmethod
+    def from_moments(
+            cls,
+            means: torch.Tensor,
+            variances: torch.Tensor
+    ) -> Self:
+
+        return cls(
+            means=means,
+            variances=variances
+        )
 
     @classmethod
     def from_tensor(

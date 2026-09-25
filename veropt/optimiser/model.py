@@ -964,6 +964,25 @@ class GPyTorchFullModel(SurrogateModel, SavableClass):
 
         return self._model
 
+    def prior_objective_scales_real_units(
+            self,
+            variable_values: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+
+        # The scale of each objective's deviation from its proxy prior at the given points, in real
+        # units, [n_points, n_objectives]; None unless every objective has a proxy prior
+
+        scales = []
+
+        for model in self._model_list:
+
+            if model.proxy_prior is None:
+                return None
+
+            scales.append(model.proxy_prior.deviation_standard_deviation_real_units(variable_values))
+
+        return torch.stack(scales, dim=-1)
+
     def update_normalisation_functions(
             self,
             unnormaliser_variables: NormalisationFunction,

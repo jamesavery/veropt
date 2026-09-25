@@ -1,7 +1,7 @@
 from copy import deepcopy
 from dataclasses import dataclass, asdict
 from enum import StrEnum, auto
-from typing import Iterator, Mapping, Optional, Self, TypedDict, Union
+from typing import Iterator, Literal, Mapping, Optional, Self, TypedDict, Union
 
 import torch
 
@@ -31,7 +31,8 @@ class OptimiserSettings(SavableClass):
             verbose: bool = True,
             renormalise_each_step: Optional[bool] = None,
             n_points_before_fitting: Optional[int] = None,
-            objective_weights: Optional[list[float]] = None
+            objective_weights: Optional[list[float]] = None,
+            variable_normalisation: Literal['data', 'bounds'] = 'data'
     ):
         self.n_initial_points = n_initial_points
         self.n_bayesian_points = n_bayesian_points
@@ -69,6 +70,15 @@ class OptimiserSettings(SavableClass):
         else:
             self.objective_weights = torch.tensor(objective_weights)
 
+        # 'data': the variables are normalised by the evaluated points' spread (refitted each step
+        # if 'renormalise_each_step'). 'bounds': by the moments of points filling the bounds
+        # uniformly, which the evaluated points cannot move -- so a lengthscale bound keeps its
+        # meaning in real units as the points cluster.
+        assert variable_normalisation in ('data', 'bounds'), (
+            f"'variable_normalisation' must be 'data' or 'bounds', received '{variable_normalisation}'."
+        )
+        self.variable_normalisation = variable_normalisation
+
     def gather_dicts_to_save(self) -> dict:
 
         return self.__dict__
@@ -91,6 +101,7 @@ class OptimiserSettingsInputDict(TypedDict, total=False):
     verbose: bool
     renormalise_each_step: bool
     initial_points_generator: InitialPointsChoice
+    variable_normalisation: Literal['data', 'bounds']
 
 
 @dataclass
